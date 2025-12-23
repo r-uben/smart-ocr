@@ -99,7 +99,10 @@ The `metadata.json` contains:
 }
 ```
 
-See `examples/kuttner_2001/` for a complete example with all 3 figures.
+See `examples/` for complete processed papers:
+- `kuttner_2001/` - 22 pages, 3 figures (monetary policy)
+- `sutskever_2014/` - 9 pages (sequence to sequence learning)
+- `bernanke_kuttner_2005/` - 37 pages, 6 vector figures (stock market reaction)
 
 ## Pipeline Architecture
 
@@ -182,7 +185,8 @@ See `examples/kuttner_2001/` for a complete example with all 3 figures.
                           │  ┌─────────────────────────┐  │
                           │  │ LLM Auditor (FREE):     │  │
                           │  │  Ollama                 │  │
-                          │  │  llama3.2 or qwen2.5    │  │
+                          │  │  deepseek-r1:32b        │  │
+                          │  │  (reasoning model)      │  │
                           │  │  • Can override heur.   │  │
                           │  │  • verdict: acceptable, │  │
                           │  │    needs_review, poor   │  │
@@ -216,6 +220,8 @@ See `examples/kuttner_2001/` for a complete example with all 3 figures.
                           │                            │
                           │  ┌──────────────────────┐  │
                           │  │ PyMuPDF Extractor:   │  │
+                          │  │  • Vector figures    │  │
+                          │  │    (charts, plots)   │  │
                           │  │  • IMAGE blocks      │  │
                           │  │  • Embedded images   │  │
                           │  │  • Filter by size    │  │
@@ -257,7 +263,7 @@ See `examples/kuttner_2001/` for a complete example with all 3 figures.
 
 **Base:**
 - Python 3.10+
-- [Ollama](https://ollama.ai) with `llama3.2` or `qwen2.5` (for quality audit)
+- [Ollama](https://ollama.ai) with `deepseek-r1:32b` (for quality audit) or `llama3.2`/`qwen2.5` as lighter alternatives
 
 **OCR Engines** (install individually based on needs):
 
@@ -284,10 +290,10 @@ pip install docr[deepseek,gemini]
 **Setup:**
 
 ```bash
-# 1. Install Ollama and pull audit model
-ollama pull llama3.2  # or qwen2.5
+# 1. Install Ollama and pull audit model (reasoning model recommended)
+ollama pull deepseek-r1:32b  # best quality, or llama3.2 for speed
 
-# 2. If using DeepSeek, pull its model
+# 2. If using DeepSeek OCR, pull its model
 ollama pull deepseek-ocr:latest
 
 # 3. If using cloud engines, set API keys
