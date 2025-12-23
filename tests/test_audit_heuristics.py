@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 pytest.importorskip("rich")
 
-from ocr_agent.audit.heuristics import HeuristicsChecker
-from ocr_agent.core.result import PageResult, PageStatus
+from ocr_cli.audit.heuristics import HeuristicsChecker
+from ocr_cli.core.result import PageResult, PageStatus
 
 
 def test_heuristics_flags_low_word_count_and_garbage() -> None:

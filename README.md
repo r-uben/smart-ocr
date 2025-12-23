@@ -1,4 +1,4 @@
-# OCR Agent
+# OCR CLI
 
 Multi-engine OCR with cascading fallback, quality audit, and figure extraction.
 
@@ -23,13 +23,13 @@ poetry install
 poetry install --extras cloud
 
 # Process a paper
-ocr-agent process paper.pdf
+ocr process paper.pdf
 
 # Process with figure images saved
-ocr-agent process paper.pdf --save-figures
+ocr process paper.pdf --save-figures
 
 # Batch process a folder
-ocr-agent batch ~/Papers/ --limit 10
+ocr batch ~/Papers/ --limit 10
 ```
 
 ## Example Output
@@ -37,7 +37,7 @@ ocr-agent batch ~/Papers/ --limit 10
 Processing a 22-page economics paper:
 
 ```
-ocr-agent v0.1.0
+ocr v0.1.0
 
 kuttner_2001_monetary_policy.pdf
 22 pages, 1.2 MB
@@ -130,14 +130,14 @@ PDF -> Primary OCR -> Quality Audit -> Fallback OCR -> Figure Pass -> Output
 ollama pull deepseek-r1:8b
 
 # Check engine status
-ocr-agent engines
+ocr engines
 ```
 
 ## CLI Commands
 
 ```bash
 # Process single PDF
-ocr-agent process paper.pdf [OPTIONS]
+ocr process paper.pdf [OPTIONS]
   -o, --output PATH      Output file path
   -f, --format           markdown|json|txt
   --primary ENGINE       Force primary engine
@@ -147,20 +147,20 @@ ocr-agent process paper.pdf [OPTIONS]
   --save-figures         Save figure images to disk
 
 # Batch process directory
-ocr-agent batch ~/Papers/ [OPTIONS]
+ocr batch ~/Papers/ [OPTIONS]
   --limit N              Process first N files
   --save-figures         Save all figure images
 
 # Check engines
-ocr-agent engines
+ocr engines
 
 # Check audit system
-ocr-agent audit-status
+ocr audit-status
 ```
 
 ## Configuration
 
-Create `ocr-agent.yaml` in your project or home directory:
+Create `ocr.yaml` in your project or home directory:
 
 ```yaml
 # Engine selection
@@ -189,7 +189,7 @@ output_format: markdown
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed module documentation.
 
 ```
-src/ocr_agent/
+src/ocr_cli/
 ├── cli.py              # Click CLI
 ├── core/
 │   ├── config.py       # AgentConfig dataclass

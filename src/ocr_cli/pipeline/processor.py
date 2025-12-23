@@ -8,21 +8,21 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from ocr_agent.audit.heuristics import HeuristicsChecker
-from ocr_agent.audit.llm_audit import LLMAuditor
-from ocr_agent.core.config import AgentConfig, EngineType
-from ocr_agent.core.document import Document, DocumentType
-from ocr_agent.core.result import OCRResult, PageResult, PageStatus, ProcessingStats
-from ocr_agent.pipeline.router import EngineRouter
-from ocr_agent.engines.base import BaseEngine
-from ocr_agent.engines.deepseek import DeepSeekEngine
-from ocr_agent.engines.gemini import GeminiEngine
-from ocr_agent.engines.mistral import MistralEngine
-from ocr_agent.engines.nougat import NougatEngine
-from ocr_agent.ui.console import AgentConsole
-from ocr_agent.ui.panels import AuditPanel, StagePanel, SummaryPanel
-from ocr_agent.ui.progress import AgentProgress
-from ocr_agent.ui.theme import AGENT_THEME
+from ocr_cli.audit.heuristics import HeuristicsChecker
+from ocr_cli.audit.llm_audit import LLMAuditor
+from ocr_cli.core.config import AgentConfig, EngineType
+from ocr_cli.core.document import Document, DocumentType
+from ocr_cli.core.result import OCRResult, PageResult, PageStatus, ProcessingStats
+from ocr_cli.pipeline.router import EngineRouter
+from ocr_cli.engines.base import BaseEngine
+from ocr_cli.engines.deepseek import DeepSeekEngine
+from ocr_cli.engines.gemini import GeminiEngine
+from ocr_cli.engines.mistral import MistralEngine
+from ocr_cli.engines.nougat import NougatEngine
+from ocr_cli.ui.console import AgentConsole
+from ocr_cli.ui.panels import AuditPanel, StagePanel, SummaryPanel
+from ocr_cli.ui.progress import AgentProgress
+from ocr_cli.ui.theme import AGENT_THEME
 
 
 class OCRPipeline:

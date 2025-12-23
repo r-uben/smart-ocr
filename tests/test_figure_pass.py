@@ -6,10 +6,10 @@ import pytest
 fitz = pytest.importorskip("fitz")
 PIL = pytest.importorskip("PIL")
 
-from ocr_agent.core.config import AgentConfig, EngineType
-from ocr_agent.core.document import Document
-from ocr_agent.core.result import FigureResult, OCRResult, PageResult
-from ocr_agent.pipeline.processor import OCRPipeline
+from ocr_cli.core.config import AgentConfig, EngineType
+from ocr_cli.core.document import Document
+from ocr_cli.core.result import FigureResult, OCRResult, PageResult
+from ocr_cli.pipeline.processor import OCRPipeline
 
 
 class _VisionStub:

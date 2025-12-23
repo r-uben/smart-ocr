@@ -1,14 +1,14 @@
-"""CLI for OCR Agent - Multi-Engine Document Processing."""
+"""CLI for OCR CLI - Multi-Engine Document Processing."""
 
 from pathlib import Path
 
 import click
 from rich.console import Console
 
-from ocr_agent import __version__
-from ocr_agent.core.config import AgentConfig, EngineType
-from ocr_agent.pipeline.processor import OCRPipeline
-from ocr_agent.ui.theme import AGENT_THEME, ENGINE_LABELS
+from ocr_cli import __version__
+from ocr_cli.core.config import AgentConfig, EngineType
+from ocr_cli.pipeline.processor import OCRPipeline
+from ocr_cli.ui.theme import AGENT_THEME, ENGINE_LABELS
 
 
 console = Console(theme=AGENT_THEME)
@@ -17,7 +17,7 @@ console = Console(theme=AGENT_THEME)
 @click.group()
 @click.version_option(version=__version__, prog_name="ocr-agent")
 def cli() -> None:
-    """OCR Agent - Multi-Engine Document Processing.
+    """OCR CLI - Multi-Engine Document Processing.
 
     A multi-agent OCR system that uses cascading fallback
     between local and cloud engines for optimal quality and cost.
@@ -227,7 +227,7 @@ def engines() -> None:
     """Show available OCR engines and their status."""
     console.print("\n[header]engines[/header]\n")
 
-    from ocr_agent.engines import (
+    from ocr_cli.engines import (
         DeepSeekEngine,
         GeminiEngine,
         MistralEngine,
@@ -261,7 +261,7 @@ def audit_status(ollama_host: str) -> None:
     """Check quality audit system status."""
     console.print("\n[header]audit[/header]\n")
 
-    from ocr_agent.audit.llm_audit import LLMAuditor
+    from ocr_cli.audit.llm_audit import LLMAuditor
 
     auditor = LLMAuditor(ollama_host=ollama_host)
     ollama_ok = auditor.is_available()

@@ -5,11 +5,11 @@ import pytest
 
 pytest.importorskip("rich")
 
-from ocr_agent.core.config import AgentConfig, EngineType
-from ocr_agent.core.result import OCRResult
-from ocr_agent.core.document import DocumentType
-from ocr_agent.pipeline.processor import OCRPipeline
-from ocr_agent.pipeline.router import EngineRouter
+from ocr_cli.core.config import AgentConfig, EngineType
+from ocr_cli.core.result import OCRResult
+from ocr_cli.core.document import DocumentType
+from ocr_cli.pipeline.processor import OCRPipeline
+from ocr_cli.pipeline.router import EngineRouter
 
 
 class _StubEngine:

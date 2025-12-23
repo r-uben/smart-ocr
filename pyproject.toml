@@ -1,14 +1,14 @@
 [project]
-name = "ocr-agent"
+name = "ocr-cli"
 version = "0.1.0"
-description = "Multi-agent OCR system with cascading fallback and beautiful terminal UI"
+description = "Multi-engine OCR with cascading fallback"
 authors = [
     {name = "Ruben Fernandez-Fuertes", email = "fernandezfuertesruben@gmail.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-keywords = ["ocr", "multi-agent", "document-processing", "pdf", "nougat", "mistral", "gemini", "deepseek"]
+keywords = ["ocr", "pdf", "document-processing", "nougat", "mistral", "gemini", "deepseek"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -36,24 +36,21 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.8.0",
 ]
-# Optional: Install specific OCR engines
 nougat = ["nougat-ocr>=0.1.17", "torch>=2.0.0"]
 gemini = ["google-genai>=1.0.0"]
 mistral = ["mistralai>=1.0.0"]
-# Install all cloud engines
 cloud = ["google-genai>=1.0.0", "mistralai>=1.0.0"]
-# Install everything
 all = ["nougat-ocr>=0.1.17", "torch>=2.0.0", "google-genai>=1.0.0", "mistralai>=1.0.0"]
 
 [project.scripts]
-ocr-agent = "ocr_agent.cli:main"
+ocr = "ocr_cli.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ocr_agent"]
+packages = ["src/ocr_cli"]
 
 [tool.ruff]
 line-length = 100

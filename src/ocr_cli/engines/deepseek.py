@@ -13,9 +13,9 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
-from ocr_agent.core.config import DeepSeekConfig
-from ocr_agent.core.result import FigureResult, PageResult
-from ocr_agent.engines.base import BaseEngine, EngineCapabilities
+from ocr_cli.core.config import DeepSeekConfig
+from ocr_cli.core.result import FigureResult, PageResult
+from ocr_cli.engines.base import BaseEngine, EngineCapabilities
 
 
 def _html_table_to_markdown(html_table: str) -> str:

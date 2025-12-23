@@ -1,4 +1,4 @@
-"""Progress display components for OCR Agent."""
+"""Progress display components for OCR CLI."""
 
 from contextlib import contextmanager
 from typing import Generator
@@ -18,7 +18,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from ocr_agent.ui.theme import (
+from ocr_cli.ui.theme import (
     AGENT_THEME,
     ENGINE_ICONS,
     ENGINE_LABELS,

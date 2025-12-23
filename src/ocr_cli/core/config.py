@@ -1,4 +1,4 @@
-"""Configuration for OCR Agent."""
+"""Configuration for OCR CLI."""
 
 import os
 from dataclasses import dataclass, field
@@ -92,7 +92,7 @@ class AuditConfig:
 
 @dataclass
 class AgentConfig:
-    """Main configuration for the OCR Agent."""
+    """Main configuration for the OCR CLI."""
 
     # Engine configurations
     nougat: NougatConfig = field(default_factory=NougatConfig)
