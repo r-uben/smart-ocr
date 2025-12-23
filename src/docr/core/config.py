@@ -20,7 +20,7 @@ class AuditModel(str, Enum):
 
     LLAMA = "llama3.2"
     QWEN = "qwen2.5"
-    DEEPSEEK = "deepseek-r1"
+    DEEPSEEK = "deepseek-r1:32b"  # Reasoning model, best for quality analysis
 
 
 @dataclass
@@ -80,7 +80,7 @@ class AuditConfig:
     """Configuration for quality audit."""
 
     enabled: bool = True
-    model: AuditModel = AuditModel.LLAMA
+    model: AuditModel = AuditModel.DEEPSEEK  # deepseek-r1:32b - reasoning model
     ollama_host: str = "http://localhost:11434"
     min_word_count: int = 50
     min_confidence: float = 0.7
