@@ -108,7 +108,7 @@ def process(
     pipeline = OCRPipeline(config)
 
     try:
-        result = pipeline.process(pdf_path)
+        result = pipeline.process(pdf_path, output_path=output)
 
         # Save output
         output_path = pipeline.save_output(result, output)

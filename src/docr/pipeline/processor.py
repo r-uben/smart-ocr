@@ -51,12 +51,20 @@ class OCRPipeline:
         ) if self.config.audit.enabled else None
 
         self._start_time = 0.0
+        self._custom_output_path: Path | None = None
         self.router = EngineRouter(self.config, self.engines)
 
-    def process(self, pdf_path: Path | str) -> OCRResult:
-        """Process a document through the full pipeline."""
+    def process(self, pdf_path: Path | str, output_path: Path | str | None = None) -> OCRResult:
+        """Process a document through the full pipeline.
+
+        Args:
+            pdf_path: Path to the PDF file to process.
+            output_path: Optional custom output path. If provided, figures will be saved
+                         alongside this file instead of in the default output directory.
+        """
         self._start_time = time.time()
         pdf_path = Path(pdf_path)
+        self._custom_output_path = Path(output_path) if output_path else None
 
         # Print header
         self.console.print_header()
@@ -340,8 +348,13 @@ class OCRPipeline:
         # Prepare figures directory if saving is enabled
         figures_dir: Path | None = None
         if self.config.save_figures:
-            doc_stem = Path(document.path).stem
-            figures_dir = self.config.output_dir / doc_stem / "figures"
+            if self._custom_output_path:
+                # Save figures alongside custom output file
+                figures_dir = self._custom_output_path.parent / "figures"
+            else:
+                # Default: save to output_dir/doc_stem/figures
+                doc_stem = Path(document.path).stem
+                figures_dir = self.config.output_dir / doc_stem / "figures"
             figures_dir.mkdir(parents=True, exist_ok=True)
 
         try:
