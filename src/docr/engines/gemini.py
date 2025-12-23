@@ -4,6 +4,7 @@ Uses the gemini-ocr-cli tool for cloud OCR processing via Google Gemini.
 CLI: https://github.com/r-uben/gemini-ocr-cli
 """
 
+import os
 import subprocess
 import tempfile
 import time
@@ -52,12 +53,14 @@ class GeminiEngine(BaseEngine):
 
         try:
             # Check if CLI is installed
+            env = os.environ.copy()
+            env["GEMINI_API_KEY"] = self.config.api_key
             result = subprocess.run(
                 ["gemini-ocr", "info"],
                 capture_output=True,
                 text=True,
                 timeout=10,
-                env={"GEMINI_API_KEY": self.config.api_key},
+                env=env,
             )
             self._initialized = result.returncode == 0
             return self._initialized
