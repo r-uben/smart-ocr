@@ -44,7 +44,7 @@ output/
 *.md
 !README.md
 !docs/*.md
-!examples/*.md
+!examples/**/*.md
 
 # Test artifacts
 test_*.md

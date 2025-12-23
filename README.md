@@ -74,14 +74,15 @@ done 22/22 pages
 
 Output structure:
 ```
-output/kuttner_2001_monetary_policy/
-├── kuttner_2001_monetary_policy.md   # Full OCR text + figure descriptions
-├── metadata.json                      # Stats, engines used, cost
-└── figures/                           # With --save-figures
+output/<doc_stem>/
+├── <doc_stem>.md      # Full OCR text + figure descriptions
+├── metadata.json      # Stats, engines used, cost
+└── figures/           # With --save-figures
     ├── figure_1_page1.png
-    ├── figure_2_page8.png
-    └── figure_3_page12.png
+    └── ...
 ```
+
+See `examples/kuttner_2001/` for a complete example.
 
 ## Pipeline
 
