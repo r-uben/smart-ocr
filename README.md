@@ -100,34 +100,177 @@ The `metadata.json` contains:
 
 See `examples/kuttner_2001/` for a complete example with all 3 figures.
 
-## Pipeline
+## Pipeline Architecture
 
 ```
-PDF -> Primary OCR -> Quality Audit -> Fallback OCR -> Figure Pass -> Output
-       (DeepSeek)     (heuristics      (Gemini for     (render +
-                      + Ollama LLM)    flagged pages)   describe)
+                                    ┌─────────────┐
+                                    │  PDF Input  │
+                                    └──────┬──────┘
+                                           │
+                                           ▼
+                              ┌────────────────────────┐
+                              │  Document Classifier   │
+                              │  (academic vs general) │
+                              └───────────┬────────────┘
+                                          │
+          ┌───────────────────────────────┼───────────────────────────────┐
+          │                               │                               │
+          ▼                               ▼                               ▼
+    ACADEMIC PATH                   GENERAL PATH                    ROUTER AGENT
+ (Nougat → DeepSeek)             (DeepSeek → Nougat)            (picks available engine)
+          │                               │                               │
+          └───────────────────────────────┴───────────────────────────────┘
+                                          │
+                          ┌───────────────┴───────────────┐
+                          │   STAGE 1: PRIMARY OCR        │
+                          │                               │
+                          │  ┌─────────────────────────┐  │
+                          │  │ Local Engines (FREE):   │  │
+                          │  │                         │  │
+                          │  │  • Nougat               │  │
+                          │  │    nougat_ocr lib       │  │
+                          │  │    model: 0.1.0-small   │  │
+                          │  │                         │  │
+                          │  │  • DeepSeek             │  │
+                          │  │    Ollama               │  │
+                          │  │    deepseek-ocr:latest  │  │
+                          │  └─────────────────────────┘  │
+                          │             OR                │
+                          │  ┌─────────────────────────┐  │
+                          │  │ Cloud Engines (PAID):   │  │
+                          │  │                         │  │
+                          │  │  • Gemini               │  │
+                          │  │    Google genai SDK     │  │
+                          │  │    gemini-3-flash       │  │
+                          │  │    ~$0.0002/page        │  │
+                          │  │                         │  │
+                          │  │  • Mistral              │  │
+                          │  │    Mistral SDK          │  │
+                          │  │    pixtral-large        │  │
+                          │  │    ~$0.001/page         │  │
+                          │  └─────────────────────────┘  │
+                          └───────────────┬───────────────┘
+                                          │
+                                   [Page Results]
+                                          │
+                                          ▼
+                          ┌───────────────────────────────┐
+                          │   STAGE 2: QUALITY AUDIT      │
+                          │                               │
+                          │  ┌─────────────────────────┐  │
+                          │  │ Heuristics Checker      │  │
+                          │  │ (rule-based, instant):  │  │
+                          │  │  • Word count ≥ 50      │  │
+                          │  │  • Garbage ratio < 15%  │  │
+                          │  │  • Avg word length ok   │  │
+                          │  │  • No unicode issues    │  │
+                          │  │  • No repeated patterns │  │
+                          │  └──────────┬──────────────┘  │
+                          │             │                 │
+                          │     [pages flagged?]          │
+                          │             │                 │
+                          │             ▼                 │
+                          │  ┌─────────────────────────┐  │
+                          │  │ Cross-Check (optional): │  │
+                          │  │  Try 2nd local engine   │  │
+                          │  └──────────┬──────────────┘  │
+                          │             │                 │
+                          │     [still flagged?]          │
+                          │             │                 │
+                          │             ▼                 │
+                          │  ┌─────────────────────────┐  │
+                          │  │ LLM Auditor (FREE):     │  │
+                          │  │  Ollama                 │  │
+                          │  │  llama3.2 or qwen2.5    │  │
+                          │  │  • Can override heur.   │  │
+                          │  │  • verdict: acceptable, │  │
+                          │  │    needs_review, poor   │  │
+                          │  └──────────┬──────────────┘  │
+                          └─────────────┼─────────────────┘
+                                        │
+                         ┌──────────────┴──────────────┐
+                         │                             │
+                    [all pass]                   [some flagged]
+                         │                             │
+                         │                             ▼
+                         │             ┌───────────────────────────────┐
+                         │             │   STAGE 3: FALLBACK OCR       │
+                         │             │                               │
+                         │             │  Router selects different     │
+                         │             │  engine (not primary):        │
+                         │             │   Gemini → Mistral →          │
+                         │             │   DeepSeek → Nougat           │
+                         │             │                               │
+                         │             │  Reprocess flagged pages      │
+                         │             └───────────────┬───────────────┘
+                         │                             │
+                         └─────────────┬───────────────┘
+                                       │
+                                  [All Pages]
+                                       │
+                                       ▼
+                          ┌────────────────────────────┐
+                          │  STAGE 4: FIGURE AGENT     │
+                          │  (if enabled)              │
+                          │                            │
+                          │  ┌──────────────────────┐  │
+                          │  │ PyMuPDF Extractor:   │  │
+                          │  │  • IMAGE blocks      │  │
+                          │  │  • Embedded images   │  │
+                          │  │  • Filter by size    │  │
+                          │  │  • Render at 150 DPI │  │
+                          │  └──────────┬───────────┘  │
+                          │             │              │
+                          │             ▼              │
+                          │  ┌──────────────────────┐  │
+                          │  │ Vision Engine:       │  │
+                          │  │  Gemini 3 Flash      │  │
+                          │  │  DeepSeek-OCR        │  │
+                          │  │  Pixtral-Large       │  │
+                          │  └──────────┬───────────┘  │
+                          │             │              │
+                          │      [Figure Results]      │
+                          └─────────────┬──────────────┘
+                                        │
+                                        ▼
+                          ┌─────────────────────────────┐
+                          │      OUTPUT ASSEMBLY        │
+                          │                             │
+                          │  Format: markdown/json/txt  │
+                          │                             │
+                          │  output/<doc_stem>/         │
+                          │    ├─ document.md           │
+                          │    ├─ metadata.json         │
+                          │    └─ figures/              │
+                          │         └─ figure_N.png     │
+                          └─────────────────────────────┘
 ```
 
-| Stage | Engine | Cost |
-|-------|--------|------|
-| Primary OCR | DeepSeek via Ollama | Free |
-| Quality Audit | Ollama (qwen2.5) | Free |
-| Fallback | Gemini 2.0 Flash | ~$0.0002/page |
-| Figures | Gemini/DeepSeek | Included |
+**Cost optimization:**
+- Local engines first (Nougat, DeepSeek via Ollama) - FREE
+- Quality audit with local Ollama (llama3.2/qwen2.5) - FREE
+- Cloud fallback only for failed pages (Gemini ~$0.0002/page)
+- Typical 22-page paper: $0.0002 total (only 1 page needed cloud)
 
 ## Requirements
 
 **Required:**
 - Python 3.10+
-- [Ollama](https://ollama.ai) with `deepseek-r1:8b` model
+- [Ollama](https://ollama.ai) with models:
+  - `deepseek-ocr:latest` (primary OCR)
+  - `llama3.2` or `qwen2.5` (quality audit)
 
-**Optional:**
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` for cloud fallback
-- `MISTRAL_API_KEY` for Mistral engine
+**Optional (for cloud fallback):**
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+- `MISTRAL_API_KEY`
 
 ```bash
-# Start Ollama and pull DeepSeek
-ollama pull deepseek-r1:8b
+# Install Ollama and pull models
+ollama pull deepseek-ocr:latest
+ollama pull llama3.2  # or qwen2.5
+
+# Optionally pull Nougat for academic papers
+# (requires nougat_ocr Python package)
 
 # Check engine status
 docr engines
