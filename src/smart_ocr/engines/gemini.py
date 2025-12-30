@@ -175,7 +175,7 @@ class GeminiEngine(BaseEngine):
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=self.config.figure_timeout,
                 )
 
                 if result.returncode != 0:

@@ -31,6 +31,7 @@ class EngineConfig:
     priority: int = 0  # Lower is higher priority
     max_retries: int = 2
     timeout: int = 300  # seconds (5 min default - increase for large docs)
+    figure_timeout: int = 180  # seconds per figure description (3 min default)
 
 
 @dataclass
@@ -68,7 +69,7 @@ class GeminiConfig(EngineConfig):
     """Gemini-specific configuration."""
 
     api_key: str = ""
-    model: str = "gemini-3-flash-preview"  # Latest flash model
+    model: str = "gemini-3-flash-preview"
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -120,10 +121,12 @@ class AgentConfig:
     # Routing overrides (set via CLI/config to force choices)
     use_primary_override: bool = False
     use_fallback_override: bool = False
+    use_figures_engine_override: bool = False
 
     # Routing preferences
     primary_engine: EngineType = EngineType.NOUGAT  # For academic
     fallback_engine: EngineType = EngineType.MISTRAL  # Cloud fallback
+    figures_engine: EngineType = EngineType.GEMINI  # For figure description
 
     def __post_init__(self) -> None:
         if isinstance(self.output_dir, str):
@@ -195,6 +198,7 @@ class AgentConfig:
             "verbose",
             "use_primary_override",
             "use_fallback_override",
+            "use_figures_engine_override",
             "render_dpi",
         ]:
             if key in data:
@@ -210,5 +214,9 @@ class AgentConfig:
             config.fallback_engine = EngineType(data["fallback_engine"])
             if "use_fallback_override" not in data:
                 config.use_fallback_override = True
+        if "figures_engine" in data:
+            config.figures_engine = EngineType(data["figures_engine"])
+            if "use_figures_engine_override" not in data:
+                config.use_figures_engine_override = True
 
         return config

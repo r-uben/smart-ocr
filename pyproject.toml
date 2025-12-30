@@ -19,7 +19,6 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-
 dependencies = [
     "rich>=13.0.0",
     "click>=8.1.0",
@@ -28,6 +27,11 @@ dependencies = [
     "httpx>=0.27.0",
     "pyyaml>=6.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/r-uben/smart-ocr"
+Repository = "https://github.com/r-uben/smart-ocr"
+Issues = "https://github.com/r-uben/smart-ocr/issues"
 
 [project.optional-dependencies]
 dev = [

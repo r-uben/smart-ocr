@@ -74,6 +74,11 @@ def cli(ctx: click.Context, pdf_path: Path | None, save_figures: bool) -> None:
     help="Save extracted figure images to output/<doc>/figures/",
 )
 @click.option(
+    "--figures-engine",
+    type=click.Choice(["gemini", "deepseek", "mistral"]),
+    help="Engine to use for figure description (default: auto-select)",
+)
+@click.option(
     "--timeout",
     type=int,
     default=300,
@@ -105,6 +110,7 @@ def process(
     no_audit: bool,
     no_figures: bool,
     save_figures: bool,
+    figures_engine: str | None,
     timeout: int,
     workers: int,
     dpi: str,
@@ -117,7 +123,7 @@ def process(
     for failed pages.
 
     Example:
-        ocr-agent process paper.pdf -o extracted.md
+        smart-ocr process paper.pdf -o extracted.md
     """
     # Parse DPI (can be "auto" or int)
     render_dpi: int | str = dpi if dpi == "auto" else int(dpi)
@@ -138,6 +144,11 @@ def process(
     config.mistral.timeout = timeout
     config.gemini.timeout = timeout
     config.figure_timeout = timeout
+    # Also set engine-level figure timeouts (used by describe_figure)
+    config.nougat.figure_timeout = timeout
+    config.deepseek.figure_timeout = timeout
+    config.mistral.figure_timeout = timeout
+    config.gemini.figure_timeout = timeout
 
     if no_audit:
         config.audit.enabled = False
@@ -148,6 +159,9 @@ def process(
     if fallback:
         config.fallback_engine = EngineType(fallback)
         config.use_fallback_override = True
+    if figures_engine:
+        config.figures_engine = EngineType(figures_engine)
+        config.use_figures_engine_override = True
 
     pipeline = OCRPipeline(config)
 
@@ -200,6 +214,11 @@ def process(
     help="Save extracted figure images",
 )
 @click.option(
+    "--figures-engine",
+    type=click.Choice(["gemini", "deepseek", "mistral"]),
+    help="Engine to use for figure description (default: auto-select)",
+)
+@click.option(
     "--timeout",
     type=int,
     default=300,
@@ -230,6 +249,7 @@ def batch(
     no_audit: bool,
     no_figures: bool,
     save_figures: bool,
+    figures_engine: str | None,
     timeout: int,
     workers: int,
     dpi: str,
@@ -238,7 +258,7 @@ def batch(
     """Process all PDFs in a directory.
 
     Example:
-        ocr-agent batch ~/Papers/ -o extracted/
+        smart-ocr batch ~/Papers/ -o extracted/
     """
     # Find all PDFs
     pdf_files = sorted(pdf_dir.glob("*.pdf"))
@@ -269,6 +289,11 @@ def batch(
     config.mistral.timeout = timeout
     config.gemini.timeout = timeout
     config.figure_timeout = timeout
+    # Also set engine-level figure timeouts (used by describe_figure)
+    config.nougat.figure_timeout = timeout
+    config.deepseek.figure_timeout = timeout
+    config.mistral.figure_timeout = timeout
+    config.gemini.figure_timeout = timeout
 
     if output_dir:
         config.output_dir = output_dir
@@ -277,6 +302,9 @@ def batch(
     if primary:
         config.primary_engine = EngineType(primary)
         config.use_primary_override = True
+    if figures_engine:
+        config.figures_engine = EngineType(figures_engine)
+        config.use_figures_engine_override = True
 
     pipeline = OCRPipeline(config)
     results: list[tuple[Path, bool, str]] = []
@@ -373,7 +401,7 @@ def describe_figures(pdf_path: Path, engine: str) -> None:
     """
     console.print(f"\n{pdf_path.name}\n")
     console.print("[warning][!] experimental[/warning]")
-    console.print("[dim]use `ocr-agent process` with figures enabled[/dim]")
+    console.print("[dim]use `smart-ocr process` with figures enabled[/dim]")
 
 
 # Shorthand aliases

@@ -17,7 +17,7 @@ class AgentConsole:
     def print_header(self) -> None:
         """Print minimal header."""
         self.console.print()
-        self.console.print(f"[dim]ocr-agent v{__version__}[/dim]")
+        self.console.print(f"[dim]smart-ocr v{__version__}[/dim]")
         self.console.print()
 
     def print_document_info(

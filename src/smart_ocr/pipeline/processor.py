@@ -382,13 +382,27 @@ class OCRPipeline:
 
         # Select engine with figure capabilities
         figure_engine = None
-        for engine_type in [EngineType.GEMINI, EngineType.DEEPSEEK, EngineType.MISTRAL]:
-            if not self.config.get_engine_config(engine_type).enabled:
-                continue
-            engine = self.engines[engine_type]
+
+        # If user specified an engine, try that first
+        if self.config.use_figures_engine_override:
+            engine = self.engines[self.config.figures_engine]
             if engine.capabilities.supports_figures and engine.is_available():
                 figure_engine = engine
-                break
+            else:
+                self.console.print_warning(
+                    f"Requested figure engine '{self.config.figures_engine.value}' not available, "
+                    "falling back to auto-select"
+                )
+
+        # Auto-select if no override or override failed
+        if not figure_engine:
+            for engine_type in [EngineType.GEMINI, EngineType.DEEPSEEK, EngineType.MISTRAL]:
+                if not self.config.get_engine_config(engine_type).enabled:
+                    continue
+                engine = self.engines[engine_type]
+                if engine.capabilities.supports_figures and engine.is_available():
+                    figure_engine = engine
+                    break
 
         if not figure_engine:
             self.console.print_warning("No figure-capable engine available")
@@ -849,12 +863,23 @@ class OCRPipeline:
                         "status": p.status.value,
                         "engine": p.engine,
                         "confidence": p.confidence,
+                        "figures": [
+                            {
+                                "figure_num": f.figure_num,
+                                "figure_type": f.figure_type,
+                                "description": f.description,
+                                "bbox": f.bbox,
+                                "image_path": f.image_path,
+                            }
+                            for f in p.figures
+                        ] if p.figures else [],
                     }
                     for p in result.pages
                 ],
                 "stats": {
                     "total_pages": result.stats.total_pages,
                     "pages_success": result.stats.pages_success,
+                    "figures_detected": result.stats.figures_detected,
                     "total_cost": result.stats.total_cost,
                     "total_time": result.stats.total_time,
                 },

@@ -1,5 +1,9 @@
 # smart-ocr
 
+[![PyPI](https://img.shields.io/pypi/v/smart-ocr)](https://pypi.org/project/smart-ocr/)
+[![Python](https://img.shields.io/pypi/pyversions/smart-ocr)](https://pypi.org/project/smart-ocr/)
+[![License](https://img.shields.io/github/license/r-uben/smart-ocr)](LICENSE)
+
 Multi-engine OCR with cascading fallback, quality audit, and figure extraction.
 
 Process academic papers and documents using free local models first, with automatic cloud fallback for failed pages. Extract and describe figures using vision models.
@@ -86,6 +90,49 @@ output/<doc_stem>/
 └── figures/           # With --save-figures
     ├── figure_1_page1.png
     └── ...
+```
+
+## Output Formats
+
+Use `-f/--format` to choose the output format:
+
+| Format | Content | Best For |
+|--------|---------|----------|
+| `markdown` (default) | Formatted text with page headers, inline figure descriptions | Human reading, documentation |
+| `json` | Structured data with pages, figures, stats, engine info | Programmatic access, downstream processing |
+| `txt` | Plain concatenated text with page separators | Simple text extraction |
+
+### JSON format structure
+
+```json
+{
+  "document": "/path/to/paper.pdf",
+  "pages": [
+    {
+      "page_num": 1,
+      "text": "...",
+      "status": "success",
+      "engine": "deepseek",
+      "confidence": null,
+      "figures": [
+        {
+          "figure_num": 1,
+          "figure_type": "scatter_plot",
+          "description": "A scatter plot showing...",
+          "bbox": [100, 200, 400, 500],
+          "image_path": "figures/figure_1_page1.png"
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "total_pages": 22,
+    "pages_success": 22,
+    "figures_detected": 3,
+    "total_cost": 0.0002,
+    "total_time": 241.5
+  }
+}
 ```
 
 The `metadata.json` contains:
@@ -267,7 +314,7 @@ See `examples/` for complete processed papers:
 ## Requirements
 
 **Base:**
-- Python 3.10+
+- Python 3.11+
 - [Ollama](https://ollama.ai) with `deepseek-r1:32b` (for quality audit) or `llama3.2`/`qwen2.5` as lighter alternatives
 
 **OCR Engines** (install individually based on needs):
@@ -334,6 +381,7 @@ smart-ocr process paper.pdf [OPTIONS]
   --no-audit             Skip quality audit
   --no-figures           Skip figure processing
   --save-figures         Save figure images to disk
+  --figures-engine       gemini|deepseek|mistral (default: auto-select)
   --timeout SECONDS      Timeout per page/figure (default: 300)
   --workers N            Parallel workers (default: 4, use 1 for sequential)
 
@@ -341,6 +389,7 @@ smart-ocr process paper.pdf [OPTIONS]
 smart-ocr batch ~/Papers/ [OPTIONS]
   --limit N              Process first N files
   --save-figures         Save all figure images
+  --figures-engine       gemini|deepseek|mistral (default: auto-select)
   --timeout SECONDS      Timeout per page/figure (default: 300)
   --workers N            Parallel workers (default: 4)
 
@@ -404,6 +453,7 @@ Create `smart-ocr.yaml` in your project or home directory:
 # Engine selection
 primary_engine: deepseek
 fallback_engine: gemini
+figures_engine: gemini  # For figure descriptions
 
 # Quality audit
 audit:
