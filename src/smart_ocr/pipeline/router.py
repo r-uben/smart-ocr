@@ -88,7 +88,7 @@ class EngineRouter:
             elif warn:
                 warn(f"Fallback override '{override.value}' not available; using automatic fallback")
 
-        preference = [EngineType.GEMINI, EngineType.MISTRAL, EngineType.DEEPSEEK, EngineType.NOUGAT]
+        preference = [EngineType.DEEPSEEK, EngineType.NOUGAT, EngineType.MISTRAL, EngineType.GEMINI]
 
         for engine_type in preference:
             if engine_type != primary and self._available(engine_type):
