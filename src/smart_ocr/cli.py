@@ -14,25 +14,39 @@ from smart_ocr.ui.theme import AGENT_THEME, ENGINE_LABELS
 console = Console(theme=AGENT_THEME)
 
 
-@click.group(invoke_without_command=True)
+class PDFShortcutGroup(click.Group):
+    """Custom group that allows PDF paths as shorthand for the process command."""
+
+    def resolve_command(self, ctx: click.Context, args: list[str]) -> tuple:
+        """Intercept unknown commands that look like PDF paths."""
+        if args:
+            cmd_name = args[0]
+            # Check if it looks like a PDF file (has .pdf extension)
+            if cmd_name.lower().endswith(".pdf"):
+                # Treat it as a shortcut to 'process' command
+                return "process", self.get_command(ctx, "process"), args
+        # Fall back to default behavior
+        return super().resolve_command(ctx, args)
+
+
+@click.group(cls=PDFShortcutGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="smart-ocr")
-@click.argument("pdf_path", type=click.Path(exists=True, path_type=Path), required=False)
-@click.option("--save-figures", is_flag=True, help="Save figure images to disk")
 @click.pass_context
-def cli(ctx: click.Context, pdf_path: Path | None, save_figures: bool) -> None:
+def cli(ctx: click.Context) -> None:
     """smart-ocr - Multi-Engine Document Processing.
 
     A multi-agent OCR system that uses cascading fallback
     between local and cloud engines for optimal quality and cost.
 
     Usage:
-        smart-ocr paper.pdf                    # Simple usage
-        smart-ocr paper.pdf --save-figures     # Save figures
+        smart-ocr paper.pdf                    # Process PDF (shorthand)
         smart-ocr process paper.pdf [OPTIONS]  # Full options
+        smart-ocr engines                      # Check engine status
+        smart-ocr batch ./papers/              # Process directory
     """
-    if ctx.invoked_subcommand is None and pdf_path is not None:
-        # Direct invocation: smart-ocr paper.pdf
-        ctx.invoke(process, pdf_path=pdf_path, save_figures=save_figures)
+    if ctx.invoked_subcommand is None:
+        # No subcommand - show help
+        click.echo(ctx.get_help())
 
 
 @cli.command()
