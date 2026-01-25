@@ -449,6 +449,10 @@ class HPCSequentialPipeline(OCRPipeline):
     ) -> list[tuple[int, int, Image.Image, str, str | None]]:
         """Extract figures from document without GPU.
 
+        Uses multiple strategies:
+        1. IMAGE blocks via page.get_text("dict") - catches most academic figures
+        2. Embedded images via page.get_images() - catches raw image assets
+
         Returns:
             List of (fig_num, page_num, image, context, fig_path) tuples
         """
@@ -491,8 +495,65 @@ class HPCSequentialPipeline(OCRPipeline):
                         ]
 
                     per_page = 0
+                    processed_regions: set[tuple[int, int, int, int]] = set()
 
-                    # Extract embedded images
+                    # Strategy 1: Extract IMAGE blocks (finds most academic figures)
+                    try:
+                        text_dict = page.get_text("dict")
+                        for block in text_dict.get("blocks", []):
+                            if (
+                                figure_counter > self.config.figures_max_total
+                                or per_page >= self.config.figures_max_per_page
+                            ):
+                                break
+                            if block.get("type") != 1:  # type 1 = image block
+                                continue
+
+                            bbox = block.get("bbox")
+                            if not bbox:
+                                continue
+
+                            x0, y0, x1, y1 = bbox
+                            width, height = x1 - x0, y1 - y0
+                            area = width * height
+                            aspect = width / max(height, 1)
+
+                            if area < min_area or aspect > 8 or aspect < 0.125:
+                                continue
+
+                            region_key = (int(x0), int(y0), int(x1), int(y1))
+                            if region_key in processed_regions:
+                                continue
+                            processed_regions.add(region_key)
+
+                            clip = fitz.Rect(bbox)
+                            mat = fitz.Matrix(render_dpi / 72, render_dpi / 72)
+                            try:
+                                pix = page.get_pixmap(matrix=mat, clip=clip)
+                                pil_img = Image.frombytes(
+                                    "RGB", (pix.width, pix.height), pix.samples
+                                )
+                            except Exception:
+                                continue
+
+                            if max(pil_img.size) > max_dim:
+                                pil_img.thumbnail((max_dim, max_dim))
+
+                            fig_path: str | None = None
+                            if figures_dir:
+                                fig_filename = f"figure_{figure_counter}_page{page_num}.png"
+                                fig_path = str(figures_dir / fig_filename)
+                                pil_img.save(fig_path)
+
+                            pending_figures.append(
+                                (figure_counter, page_num, pil_img, context_text, fig_path)
+                            )
+                            figure_counter += 1
+                            per_page += 1
+                    except Exception:
+                        pass
+
+                    # Strategy 2: Extract raw embedded images
                     images = page.get_images(full=True)
                     for img in images:
                         if (
@@ -509,6 +570,16 @@ class HPCSequentialPipeline(OCRPipeline):
                         if area < min_area or aspect > 8 or aspect < 0.125:
                             continue
 
+                        # Skip small images (likely icons/bullets)
+                        try:
+                            raw_image = pdf.extract_image(xref)
+                            if len(raw_image.get("image", b"")) < 5000:
+                                continue
+                        except Exception:
+                            pass
+
+                        pix = None
+                        rgb = None
                         try:
                             pix = fitz.Pixmap(pdf, xref)
                             if pix.colorspace is None:
@@ -523,6 +594,9 @@ class HPCSequentialPipeline(OCRPipeline):
                             )
                         except Exception:
                             continue
+                        finally:
+                            del rgb
+                            del pix
 
                         if max(pil_img.size) > max_dim:
                             pil_img.thumbnail((max_dim, max_dim))
