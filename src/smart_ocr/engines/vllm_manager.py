@@ -27,7 +27,6 @@ class ServerConfig:
     max_model_len: int = 8192
     trust_remote_code: bool = True
     dtype: str = "auto"
-    api_key: str = "EMPTY"
 
 
 class VLLMServerManager:
@@ -77,7 +76,7 @@ class VLLMServerManager:
         if self.process is not None:
             self.stop()
 
-        # Build command
+        # Build command (no --api-key for local HPC usage)
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", config.model,
@@ -86,7 +85,6 @@ class VLLMServerManager:
             "--max-model-len", str(config.max_model_len),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
             "--dtype", config.dtype,
-            "--api-key", config.api_key,
         ]
 
         if config.trust_remote_code:
