@@ -149,6 +149,11 @@ def cli(ctx: click.Context) -> None:
     help="Vision model for HPC figures (default: Qwen/Qwen2-VL-7B-Instruct)",
 )
 @click.option(
+    "--no-cloud-fallback",
+    is_flag=True,
+    help="Disable Gemini fallback for failed pages in HPC mode",
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, path_type=Path),
@@ -179,6 +184,7 @@ def process(
     hpc_sequential: bool,
     ocr_model: str | None,
     vision_model: str | None,
+    no_cloud_fallback: bool,
     config_path: Path | None,
     profile: str | None,
 ) -> None:
@@ -242,6 +248,8 @@ def process(
             config.hpc.ocr_model = ocr_model
         if vision_model:
             config.hpc.vision_model = vision_model
+        if no_cloud_fallback:
+            config.hpc.cloud_fallback = False
 
     # Apply timeout to all engine configs
     config.nougat.timeout = timeout
@@ -386,6 +394,11 @@ def process(
     help="Vision model for HPC figures (default: Qwen/Qwen2-VL-7B-Instruct)",
 )
 @click.option(
+    "--no-cloud-fallback",
+    is_flag=True,
+    help="Disable Gemini fallback for failed pages in HPC mode",
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, path_type=Path),
@@ -414,6 +427,7 @@ def batch(
     vllm_url: str | None,
     ocr_model: str | None,
     vision_model: str | None,
+    no_cloud_fallback: bool,
     config_path: Path | None,
     profile: str | None,
 ) -> None:
@@ -477,6 +491,8 @@ def batch(
             config.hpc.ocr_model = ocr_model
         if vision_model:
             config.hpc.vision_model = vision_model
+        if no_cloud_fallback:
+            config.hpc.cloud_fallback = False
 
     # Apply timeout to all engine configs
     config.nougat.timeout = timeout

@@ -152,6 +152,9 @@ class DeepSeekVLLMEngine(BaseEngine):
                     "messages": messages,
                     "max_tokens": self.config.max_tokens,
                     "temperature": self.config.temperature,
+                    # Anti-hallucination parameters
+                    "frequency_penalty": self.config.frequency_penalty,
+                    "repetition_penalty": self.config.repetition_penalty,
                 },
             )
 

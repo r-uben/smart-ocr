@@ -38,6 +38,20 @@ class HeuristicsResult:
 class HeuristicsChecker:
     """Fast heuristic checks for OCR quality."""
 
+    # LLM refusal patterns (case-insensitive)
+    REFUSAL_PATTERNS = [
+        r"I cannot read",
+        r"I am sorry",
+        r"I'm sorry",
+        r"As an AI",
+        r"I'm unable to",
+        r"cannot process this image",
+        r"I cannot assist",
+        r"I can't read",
+        r"unable to extract",
+        r"cannot extract text",
+    ]
+
     def __init__(
         self,
         min_word_count: int = 50,
@@ -63,6 +77,34 @@ class HeuristicsChecker:
             ))
             return result
 
+        # LLM refusal detection (critical failure)
+        if self._check_llm_refusal(text):
+            result.add_metric(AuditMetric(
+                name="LLM refusal",
+                value="Model refused to process image",
+                passed=False,
+                severity="error",
+            ))
+            return result  # Early exit - no point checking further
+
+        # CID artifact detection (PDF font mapping failures)
+        if self._check_cid_artifacts(text):
+            result.add_metric(AuditMetric(
+                name="CID artifacts",
+                value="PDF font mapping failures detected",
+                passed=False,
+                severity="error",
+            ))
+
+        # Hallucination loop detection
+        if self._check_hallucination_loops(text):
+            result.add_metric(AuditMetric(
+                name="Hallucination loops",
+                value="Repeated sentence patterns detected",
+                passed=False,
+                severity="error",
+            ))
+
         # Word count check
         words = text.split()
         word_count = len(words)
@@ -86,14 +128,18 @@ class HeuristicsChecker:
                 severity="warning",
             ))
 
-        # Garbage character ratio
+        # Check if content is math-dense (high LaTeX tokens)
+        is_math_dense = self._is_math_dense(text)
+
+        # Garbage character ratio - exception for math-dense content
         garbage_ratio = self._calculate_garbage_ratio(text)
+        garbage_passed = garbage_ratio <= self.max_garbage_ratio or is_math_dense
         result.add_metric(AuditMetric(
             name="Garbage ratio",
-            value=f"{garbage_ratio:.1%}",
+            value=f"{garbage_ratio:.1%}" + (" (math-dense)" if is_math_dense else ""),
             threshold=f"<{self.max_garbage_ratio:.0%}",
-            passed=garbage_ratio <= self.max_garbage_ratio,
-            severity="error" if garbage_ratio > self.max_garbage_ratio else "info",
+            passed=garbage_passed,
+            severity="info" if garbage_passed else "error",
         ))
 
         # Unicode issues check
@@ -126,6 +172,49 @@ class HeuristicsChecker:
         ))
 
         return result
+
+    def _check_llm_refusal(self, text: str) -> bool:
+        """Detect LLM refusal patterns indicating model couldn't process image."""
+        for pattern in self.REFUSAL_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+
+    def _check_cid_artifacts(self, text: str) -> bool:
+        """Detect PDF font mapping failures (CID references)."""
+        # (cid:XX) patterns indicate failed character mapping
+        return bool(re.search(r'\(cid:\d+\)', text))
+
+    def _is_math_dense(self, text: str) -> bool:
+        """Check if high 'garbage' characters are actually LaTeX.
+
+        Math-heavy pages have many backslashes, braces, underscores, carets.
+        If >30% of characters are LaTeX tokens, don't penalize as garbage.
+        """
+        if not text:
+            return False
+        latex_chars = sum(1 for c in text if c in r'\{}^_$')
+        return latex_chars / len(text) > 0.30
+
+    def _check_hallucination_loops(self, text: str) -> bool:
+        """Detect exact sentence repetition (hallucination loops).
+
+        If the same sentence appears 3+ times consecutively, it's likely
+        a model hallucination rather than legitimate content.
+        """
+        # Split into sentences
+        sentences = re.split(r'[.!?]\s+', text)
+        if len(sentences) < 6:
+            return False
+
+        # Check for consecutive repetition
+        for i in range(len(sentences) - 2):
+            s = sentences[i].strip()
+            if len(s) < 20:  # Skip very short "sentences"
+                continue
+            if s == sentences[i + 1].strip() == sentences[i + 2].strip():
+                return True
+        return False
 
     def _calculate_garbage_ratio(self, text: str) -> float:
         """Calculate ratio of garbage characters to total characters."""

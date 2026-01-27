@@ -108,6 +108,8 @@ class DeepSeekVLLMConfig(EngineConfig):
     model: str = "deepseek-ai/DeepSeek-OCR"  # DeepSeek-OCR model
     max_tokens: int = 4096  # OCR needs more tokens than figure description
     temperature: float = 0.0  # Deterministic for OCR
+    repetition_penalty: float = 1.1  # Penalize repeated tokens to prevent loops
+    frequency_penalty: float = 0.3  # OpenAI-style penalty for frequent tokens
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -121,11 +123,15 @@ class HPCConfig:
     """Configuration for HPC multi-agent mode.
 
     HPC mode runs multiple OCR engines in parallel locally via vLLM,
-    then reconciles outputs intelligently. No cloud fallback in HPC mode.
+    then reconciles outputs intelligently.
 
     Two modes available:
     - Parallel (default): Expects multiple vLLM servers or multi-GPU setup
     - Sequential: Single-GPU mode that swaps models between phases
+
+    Quality features:
+    - audit_enabled: Run heuristics on OCR output to detect failures
+    - cloud_fallback: Re-OCR failed pages with Gemini (cheap cloud fallback)
     """
 
     enabled: bool = False
@@ -141,6 +147,8 @@ class HPCConfig:
     gpu_memory_utilization: float = 0.9  # vLLM GPU memory fraction
     max_model_len: int = 8192  # Max context length for vLLM
     server_startup_timeout: int = 180  # Seconds to wait for vLLM server
+    audit_enabled: bool = True  # Run heuristics on OCR output
+    cloud_fallback: bool = True  # Enable Gemini fallback for failed pages
 
     def __post_init__(self) -> None:
         if not self.vllm_url:

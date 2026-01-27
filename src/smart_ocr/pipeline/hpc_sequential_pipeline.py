@@ -15,10 +15,12 @@ from pathlib import Path
 
 from PIL import Image
 
+from smart_ocr.audit.heuristics import HeuristicsChecker
 from smart_ocr.core.config import AgentConfig, EngineType
 from smart_ocr.core.document import Document
 from smart_ocr.core.result import FigureResult, OCRResult, PageResult, PageStatus
 from smart_ocr.engines.deepseek_vllm import DeepSeekVLLMEngine
+from smart_ocr.engines.gemini import GeminiEngine
 from smart_ocr.engines.nougat import NougatEngine
 from smart_ocr.engines.vllm import VLLMEngine
 from smart_ocr.engines.vllm_manager import ServerConfig, VLLMServerManager
@@ -55,6 +57,15 @@ class HPCSequentialPipeline(OCRPipeline):
             reconciler_model=self.config.hpc.reconciler_model,
             vllm_url=self.config.hpc.vllm_url,
         )
+
+        # Initialize heuristics checker for quality audit
+        self.heuristics = HeuristicsChecker(
+            min_word_count=self.config.audit.min_word_count,
+            max_garbage_ratio=0.15,
+        )
+
+        # Gemini engine for cloud fallback (lazy init)
+        self._gemini_engine: GeminiEngine | None = None
 
         # Cache for page images (avoid re-rendering between phases)
         self._page_images: dict[int, Image.Image] = {}
@@ -269,6 +280,99 @@ class HPCSequentialPipeline(OCRPipeline):
         if self.config.hpc.manage_server:
             self.console.console.print("[dim]Stopping OCR server...[/dim]")
             self.server_manager.stop()
+
+        # Quality audit + Gemini fallback
+        if self.config.hpc.audit_enabled:
+            failed_pages = self._audit_ocr_results(outputs)
+
+            if failed_pages and self.config.hpc.cloud_fallback:
+                gemini_outputs = self._fallback_to_gemini(failed_pages)
+                # Replace failed pages with Gemini output
+                outputs.update(gemini_outputs)
+
+        return outputs
+
+    def _audit_ocr_results(
+        self,
+        ocr_outputs: dict[int, EngineOutput],
+    ) -> list[int]:
+        """Run heuristics on OCR outputs, return failed page numbers."""
+        failed = []
+        for page_num, output in ocr_outputs.items():
+            result = self.heuristics.check(output.text)
+            if not result.passed:
+                failed.append(page_num)
+                error_summary = ", ".join(result.errors[:2])  # First 2 errors
+                self.console.console.print(
+                    f"  [warning]![/warning] Page {page_num} failed audit: {error_summary}"
+                )
+
+        if failed:
+            self.console.console.print(
+                f"  [dim]{len(failed)}/{len(ocr_outputs)} pages failed quality check[/dim]"
+            )
+        else:
+            self.console.console.print(
+                f"  [success]+[/success] All {len(ocr_outputs)} pages passed quality check"
+            )
+
+        return failed
+
+    def _fallback_to_gemini(
+        self,
+        failed_pages: list[int],
+    ) -> dict[int, EngineOutput]:
+        """Re-OCR failed pages with Gemini.
+
+        Sends original page images to Gemini for fresh OCR, rather than
+        trying to "fix" the failed DeepSeek output.
+        """
+        if not failed_pages:
+            return {}
+
+        self.console.console.print(
+            f"\n  [info]Gemini fallback[/info] - Re-processing {len(failed_pages)} failed pages"
+        )
+
+        # Lazy-init Gemini engine
+        if self._gemini_engine is None:
+            self._gemini_engine = GeminiEngine(self.config.gemini)
+
+        if not self._gemini_engine.is_available():
+            self.console.console.print(
+                "  [warning]![/warning] Gemini not available (check GEMINI_API_KEY)"
+            )
+            return {}
+
+        outputs: dict[int, EngineOutput] = {}
+        success_count = 0
+
+        for page_num in failed_pages:
+            image = self._page_images.get(page_num)
+            if not image:
+                continue
+
+            result = self._gemini_engine.process_image(image, page_num)
+            if result.status == PageStatus.SUCCESS:
+                outputs[page_num] = EngineOutput(
+                    engine="gemini",
+                    text=result.text,
+                    confidence=result.confidence or 0.9,
+                    processing_time=result.processing_time,
+                )
+                success_count += 1
+                self.console.console.print(
+                    f"  [success]+[/success] Page {page_num} re-processed with Gemini"
+                )
+            else:
+                err = result.error_message
+                self.console.console.print(
+                    f"  [error]x[/error] Page {page_num} Gemini fallback failed: {err}"
+                )
+
+        self.console.console.print(
+            f"  [dim]Gemini fallback: {success_count}/{len(failed_pages)} pages recovered[/dim]"
+        )
 
         return outputs
 
