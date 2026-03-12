@@ -1,8 +1,5 @@
-"""Pipeline orchestration for multi-agent OCR processing."""
+"""Pipeline orchestration for OCR processing."""
 
-from smart_ocr.pipeline.hpc_pipeline import HPCPipeline
-from smart_ocr.pipeline.hpc_sequential_pipeline import HPCSequentialPipeline
-from smart_ocr.pipeline.processor import OCRPipeline
-from smart_ocr.pipeline.reconciler import OutputReconciler
+from smart_ocr.pipeline.processor import StandardPipeline
 
-__all__ = ["OCRPipeline", "HPCPipeline", "HPCSequentialPipeline", "OutputReconciler"]
+__all__ = ["StandardPipeline"]

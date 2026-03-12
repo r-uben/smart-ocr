@@ -77,7 +77,7 @@
   - [ ] Both pipelines use the shared module
 
 ### [TICKET-5] Rewrite StandardPipeline — document-level stages
-- **Status:** pending
+- **Status:** done
 - **Priority:** high
 - **Files:** `src/smart_ocr/pipeline/processor.py`
 - **Description:**
