@@ -114,7 +114,7 @@
   - [ ] `hpc_sequential_pipeline.py` deleted
 
 ### [TICKET-7] MetadataManager — incremental batch processing
-- **Status:** pending
+- **Status:** done
 - **Priority:** high
 - **Files:** `src/smart_ocr/core/metadata.py` (new)
 - **Description:**
