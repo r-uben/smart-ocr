@@ -58,6 +58,12 @@ class StandardPipeline:
         if self.config.save_figures and result.success:
             self._run_figures(doc, result, out_dir)
 
+        # Save output
+        if result.success:
+            saved = self._save_result(doc, result, out_dir)
+            if not self.config.quiet:
+                console.print(f"[blue]Output:[/blue] {saved}")
+
         if not self.config.quiet:
             self._print_summary(result)
 
@@ -217,6 +223,17 @@ class StandardPipeline:
             )
             for fig in extracted
         ]
+
+    def _save_result(self, doc: DocumentHandle, result: DocumentResult, output_dir: Path) -> Path:
+        """Save the OCR markdown to output_dir/{stem}/{stem}.md."""
+        from smart_ocr.engines.base import sanitize_filename
+
+        stem = sanitize_filename(doc.stem)
+        doc_dir = output_dir / stem
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        md_path = doc_dir / f"{stem}.md"
+        md_path.write_text(result.markdown, encoding="utf-8")
+        return md_path
 
     def _print_summary(self, result: DocumentResult) -> None:
         status = "[green]Success[/green]" if result.success else f"[red]{result.status.value}[/red]"
