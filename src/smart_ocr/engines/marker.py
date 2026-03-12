@@ -1,6 +1,6 @@
-"""Nougat OCR engine adapter.
+"""Marker OCR engine adapter.
 
-CLI: nougat-ocr <path> -o <dir> [--pages 0-5] [--device auto|cpu|cuda|mps] [-q]
+CLI: marker-ocr <path> -o <dir> [--pages 0-5] [--device auto|cpu|cuda|mps] [--force-ocr] [-q]
 Flat @click.command — no subcommands.
 """
 
@@ -10,16 +10,16 @@ from smart_ocr.core.config import PipelineConfig
 from smart_ocr.engines.base import BaseEngine
 
 
-class NougatEngine(BaseEngine):
-    """Adapter for nougat-ocr-cli."""
+class MarkerEngine(BaseEngine):
+    """Adapter for marker-ocr-cli."""
 
     @property
     def name(self) -> str:
-        return "nougat"
+        return "marker"
 
     @property
     def cli_command(self) -> str:
-        return "nougat-ocr"
+        return "marker-ocr"
 
     def _build_command(
         self,
@@ -31,7 +31,7 @@ class NougatEngine(BaseEngine):
             self.cli_command,
             str(pdf_path),
             "-o", str(output_dir),
-            "--model", config.nougat_model,
+            "--device", config.marker_device,
         ]
         if config.quiet:
             cmd.append("-q")

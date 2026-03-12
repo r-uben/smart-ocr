@@ -30,7 +30,7 @@
   - [ ] No backwards-compat shims for old classes
 
 ### [TICKET-2] Engine interface + fix CLI commands
-- **Status:** pending
+- **Status:** done
 - **Priority:** high
 - **Files:** `src/smart_ocr/engines/base.py`, `src/smart_ocr/engines/gemini.py`, `src/smart_ocr/engines/nougat.py`, `src/smart_ocr/engines/deepseek.py`, `src/smart_ocr/engines/mistral.py`
 - **Description:**
@@ -48,7 +48,7 @@
   - [ ] Old per-page interface fully removed
 
 ### [TICKET-3] Add Marker engine
-- **Status:** pending
+- **Status:** done
 - **Priority:** medium
 - **Files:** `src/smart_ocr/engines/marker.py` (new)
 - **Description:**

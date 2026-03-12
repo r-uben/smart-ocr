@@ -1,140 +1,159 @@
-"""Base engine adapter for OCR processing."""
+"""Base engine adapter for smart-ocr v1.0.
 
+Engines call their CLI once per document (one subprocess per PDF).
+No more per-page subprocess calls or PIL image passing.
+"""
+
+import logging
+import subprocess
+import tempfile
+import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from PIL import Image
+from smart_ocr.core.config import PipelineConfig
+from smart_ocr.core.result import DocumentResult, DocumentStatus
 
-from smart_ocr.core.result import FigureResult, PageResult, PageStatus
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class EngineCapabilities:
-    """Capabilities of an OCR engine."""
-
-    name: str
-    supports_pdf: bool = False
-    supports_images: bool = True
-    supports_batch: bool = False
-    supports_figures: bool = False
-    is_local: bool = True
-    cost_per_page: float = 0.0  # 0 means free
-    best_for: list[str] | None = None  # e.g., ["academic", "scientific"]
-
-    def __post_init__(self) -> None:
-        if self.best_for is None:
-            self.best_for = []
+def sanitize_filename(name: str) -> str:
+    """Sanitize a filename for use as a directory name."""
+    return "".join(c if c.isalnum() or c in "._- " else "_" for c in name).strip()
 
 
 class BaseEngine(ABC):
-    """Abstract base class for OCR engines."""
+    """Abstract base class for CLI-based OCR engines.
 
-    def __init__(self) -> None:
-        self._initialized = False
+    Each engine wraps a sibling CLI tool (gemini-ocr, nougat-ocr, etc.).
+    The contract: call CLI once per PDF, read output markdown from
+    {output_dir}/{stem}/{stem}.md.
+    """
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Engine identifier."""
+        """Engine identifier (matches EngineType value)."""
         ...
 
     @property
     @abstractmethod
-    def capabilities(self) -> EngineCapabilities:
-        """Engine capabilities."""
+    def cli_command(self) -> str:
+        """The CLI binary name (e.g., 'gemini-ocr', 'nougat-ocr')."""
         ...
-
-    @abstractmethod
-    def initialize(self) -> bool:
-        """Initialize the engine. Returns True if successful."""
-        ...
-
-    @abstractmethod
-    def process_image(self, image: Image.Image, page_num: int = 1) -> PageResult:
-        """Process a single image and return OCR result."""
-        ...
-
-    def process_pdf_page(self, pdf_path: Path, page_num: int) -> PageResult:
-        """Process a single page from a PDF. Default extracts and processes image."""
-        import fitz
-
-        pdf = fitz.open(pdf_path)
-        page = pdf[page_num - 1]  # 0-indexed
-
-        # Render at 150 DPI
-        mat = fitz.Matrix(150 / 72, 150 / 72)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-        pdf.close()
-        return self.process_image(img, page_num)
-
-    def process_pdf(self, pdf_path: Path) -> list[PageResult]:
-        """Process an entire PDF. Override for batch processing."""
-        import fitz
-
-        results = []
-        pdf = fitz.open(pdf_path)
-        num_pages = len(pdf)
-        pdf.close()
-
-        for page_num in range(1, num_pages + 1):
-            result = self.process_pdf_page(pdf_path, page_num)
-            results.append(result)
-
-        return results
-
-    def describe_figure(
-        self,
-        image: Image.Image,
-        figure_type: str = "unknown",
-        context: str = "",
-    ) -> FigureResult:
-        """Describe a figure. Override for figure-capable engines."""
-        return FigureResult(
-            figure_num=0,
-            page_num=0,
-            figure_type=figure_type,
-            description="Figure description not supported by this engine",
-        )
 
     def is_available(self) -> bool:
-        """Check if engine is available and ready to use."""
+        """Check if the CLI tool is installed and callable."""
         try:
-            return self.initialize()
-        except Exception:
+            result = subprocess.run(
+                [self.cli_command, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except (subprocess.SubprocessError, FileNotFoundError):
             return False
 
-    def _create_error_result(
+    def process_document(
         self,
-        page_num: int,
-        error_message: str,
-    ) -> PageResult:
-        """Create an error result."""
-        return PageResult(
-            page_num=page_num,
-            status=PageStatus.ERROR,
-            engine=self.name,
-            error_message=error_message,
-        )
+        pdf_path: Path,
+        output_dir: Path,
+        config: PipelineConfig,
+    ) -> DocumentResult:
+        """Process a PDF document via CLI subprocess.
 
-    def _create_success_result(
+        Calls the CLI once on the whole PDF, reads the output markdown.
+        """
+        start_time = time.time()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_out = Path(tmpdir)
+            cmd = self._build_command(pdf_path, tmp_out, config)
+
+            logger.info(f"[{self.name}] Running: {' '.join(cmd)}")
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=config.timeout,
+                )
+
+                if result.returncode != 0:
+                    stderr = result.stderr.strip() if result.stderr else "Unknown error"
+                    logger.error(f"[{self.name}] CLI failed: {stderr}")
+                    return DocumentResult(
+                        document_path=pdf_path,
+                        engine=self.name,
+                        status=DocumentStatus.ERROR,
+                        error=f"CLI exited {result.returncode}: {stderr[:500]}",
+                        processing_time=time.time() - start_time,
+                    )
+
+                # Read output markdown
+                markdown = self._read_output(pdf_path, tmp_out)
+                if markdown is None:
+                    return DocumentResult(
+                        document_path=pdf_path,
+                        engine=self.name,
+                        status=DocumentStatus.ERROR,
+                        error="CLI produced no output markdown",
+                        processing_time=time.time() - start_time,
+                    )
+
+                return DocumentResult(
+                    document_path=pdf_path,
+                    engine=self.name,
+                    status=DocumentStatus.SUCCESS,
+                    markdown=markdown,
+                    processing_time=time.time() - start_time,
+                )
+
+            except subprocess.TimeoutExpired:
+                return DocumentResult(
+                    document_path=pdf_path,
+                    engine=self.name,
+                    status=DocumentStatus.ERROR,
+                    error=f"Timeout after {config.timeout}s",
+                    processing_time=time.time() - start_time,
+                )
+
+    @abstractmethod
+    def _build_command(
         self,
-        page_num: int,
-        text: str,
-        confidence: float | None = None,
-        processing_time: float = 0.0,
-        cost: float = 0.0,
-    ) -> PageResult:
-        """Create a success result."""
-        return PageResult(
-            page_num=page_num,
-            text=text,
-            status=PageStatus.SUCCESS,
-            engine=self.name,
-            confidence=confidence,
-            processing_time=processing_time,
-            cost=cost,
-        )
+        pdf_path: Path,
+        output_dir: Path,
+        config: PipelineConfig,
+    ) -> list[str]:
+        """Build the CLI command for this engine."""
+        ...
+
+    def _read_output(self, pdf_path: Path, output_dir: Path) -> str | None:
+        """Read the output markdown from the CLI's output directory.
+
+        All sibling CLIs write to: {output_dir}/{stem}/{stem}.md
+        """
+        stem = sanitize_filename(pdf_path.stem)
+        md_path = output_dir / stem / f"{stem}.md"
+
+        if md_path.exists():
+            text = md_path.read_text(encoding="utf-8")
+            return self._strip_frontmatter(text)
+
+        # Fallback: search for any .md file in output
+        for md_file in output_dir.rglob("*.md"):
+            text = md_file.read_text(encoding="utf-8")
+            return self._strip_frontmatter(text)
+
+        return None
+
+    @staticmethod
+    def _strip_frontmatter(text: str) -> str:
+        """Remove YAML frontmatter if present."""
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                return parts[2].strip()
+        return text
