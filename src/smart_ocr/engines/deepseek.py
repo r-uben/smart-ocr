@@ -4,10 +4,16 @@ CLI: deepseek-ocr process <path> -o <dir> [--backend ollama|vllm] [--vllm-url]
 Click group — requires explicit 'process' subcommand.
 """
 
+import logging
+import subprocess
 from pathlib import Path
 
 from smart_ocr.core.config import PipelineConfig
 from smart_ocr.engines.base import BaseEngine
+
+logger = logging.getLogger(__name__)
+
+OLLAMA_MODEL = "deepseek-ocr"
 
 
 class DeepSeekEngine(BaseEngine):
@@ -20,6 +26,52 @@ class DeepSeekEngine(BaseEngine):
     @property
     def cli_command(self) -> str:
         return "deepseek-ocr"
+
+    def is_available(self) -> bool:
+        """Check CLI is installed and, for Ollama backend, that the model is pulled."""
+        if not super().is_available():
+            return False
+        # vLLM backend doesn't need Ollama model check
+        return True
+
+    def check_ollama_model(self) -> str | None:
+        """Check if the Ollama model is available. Returns error message or None."""
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return "Ollama is not running or not installed"
+            if OLLAMA_MODEL not in result.stdout:
+                return (
+                    f"Ollama model '{OLLAMA_MODEL}' not found. "
+                    f"Pull it with: ollama pull {OLLAMA_MODEL}"
+                )
+        except FileNotFoundError:
+            return "Ollama is not installed (ollama command not found)"
+        except subprocess.TimeoutExpired:
+            return "Ollama did not respond (timeout)"
+        return None
+
+    def process_document(self, pdf_path, output_dir, config):
+        """Process document, with Ollama model pre-check for ollama backend."""
+        if config.deepseek_backend != "vllm":
+            error = self.check_ollama_model()
+            if error:
+                import time
+                from smart_ocr.core.result import DocumentResult, DocumentStatus
+                logger.error(f"[{self.name}] {error}")
+                return DocumentResult(
+                    document_path=pdf_path,
+                    engine=self.name,
+                    status=DocumentStatus.ERROR,
+                    error=error,
+                    processing_time=0.0,
+                )
+        return super().process_document(pdf_path, output_dir, config)
 
     def _build_command(
         self,

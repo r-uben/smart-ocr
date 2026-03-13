@@ -134,29 +134,56 @@ class BaseEngine(ABC):
     def _read_output(self, pdf_path: Path, output_dir: Path) -> str | None:
         """Read the output markdown from the CLI's output directory.
 
-        All sibling CLIs write to: {output_dir}/{stem}/{stem}.md
+        Sibling CLIs use different output structures:
+          - gemini-ocr: {output_dir}/{sanitized_stem}/{sanitized_stem}.md
+          - deepseek-ocr: {output_dir}/{stem}/{stem}.md
+          - mistral-ocr: {output_dir}/{stem}.md (flat, no subdirectory)
+          - nougat-ocr/marker-ocr: {output_dir}/{stem}/{stem}.md
         """
         stem = sanitize_filename(pdf_path.stem)
+
+        # Try subdirectory layout first: {output_dir}/{stem}/{stem}.md
         md_path = output_dir / stem / f"{stem}.md"
-
         if md_path.exists():
-            text = md_path.read_text(encoding="utf-8")
-            return self._strip_frontmatter(text)
+            return self._clean_output(md_path.read_text(encoding="utf-8"))
 
-        # Fallback: search for any .md file in output
+        # Try flat layout: {output_dir}/{stem}.md
+        flat_path = output_dir / f"{stem}.md"
+        if flat_path.exists():
+            return self._clean_output(flat_path.read_text(encoding="utf-8"))
+
+        # Fallback: find any .md file (handles sanitization mismatches)
         for md_file in output_dir.rglob("*.md"):
-            text = md_file.read_text(encoding="utf-8")
-            return self._strip_frontmatter(text)
+            return self._clean_output(md_file.read_text(encoding="utf-8"))
 
         return None
 
     @staticmethod
-    def _strip_frontmatter(text: str) -> str:
-        """Remove YAML frontmatter if present."""
+    def _clean_output(text: str) -> str:
+        """Remove frontmatter and metadata headers from CLI output.
+
+        Handles:
+          - YAML frontmatter (--- ... ---)
+          - Metadata headers (# OCR Results + **Original File:** + **Processed:** + ---)
+        """
+        import re
+
+        # Strip YAML frontmatter
         if text.startswith("---"):
             parts = text.split("---", 2)
             if len(parts) >= 3:
-                return parts[2].strip()
+                text = parts[2].strip()
+
+        # Strip metadata header block (mistral-ocr format):
+        # # OCR Results\n\n**Original File:**...\n**Full Path:**...\n**Processed:**...\n\n---
+        text = re.sub(
+            r"^#\s*OCR Results\s*\n+"
+            r"(?:\*\*(?:Original File|Full Path|Processed|Processing Time):\*\*[^\n]*\n)*"
+            r"\s*(?:---\s*\n)?",
+            "",
+            text,
+        ).strip()
+
         return text
 
 
