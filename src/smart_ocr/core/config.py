@@ -15,6 +15,7 @@ class EngineType(str, Enum):
     GEMINI = "gemini"
     MARKER = "marker"
     DEEPSEEK_VLLM = "deepseek-vllm"  # DeepSeek via vLLM HTTP API (HPC mode)
+    VLLM = "vllm"  # Generic vLLM vision model (figures only, HPC mode)
 
 
 # Default engine priority: local free → cheap cloud → expensive cloud
@@ -25,6 +26,7 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
     EngineType.GEMINI: 3,
     EngineType.MISTRAL: 4,
     EngineType.DEEPSEEK_VLLM: 5,
+    EngineType.VLLM: 6,
 }
 
 
@@ -49,6 +51,10 @@ class HPCConfig:
     server_startup_timeout: int = 180
     audit_enabled: bool = True
     cloud_fallback: bool = True
+    use_llm_reconciler: bool = False
+    reconciler_model: str = ""
+    render_dpi: int = 200
+    parallel_pages: int = 1
 
     def __post_init__(self) -> None:
         if not self.vllm_url:

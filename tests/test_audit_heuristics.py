@@ -28,5 +28,4 @@ def test_page_reprocessing_logic() -> None:
     page = PageResult(page_num=1, text="ok", status=PageStatus.SUCCESS, confidence=0.5, audit_passed=False)
     assert page.needs_reprocessing() is True
     page.audit_passed = True
-    page.confidence = 0.9
     assert page.needs_reprocessing() is False

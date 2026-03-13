@@ -10,7 +10,7 @@ from smart_ocr.core.config import EngineType, PipelineConfig
 
 console = Console()
 
-ENGINE_CHOICES = [e.value for e in EngineType if e != EngineType.DEEPSEEK_VLLM]
+ENGINE_CHOICES = [e.value for e in EngineType if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)]
 
 
 class PDFShortcutGroup(click.Group):
@@ -104,8 +104,9 @@ def cli(ctx: click.Context) -> None:
 @cli.command()
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
+@click.option("--hpc-sequential", is_flag=True, help="Use HPC sequential pipeline (vLLM)")
 @common_options
-def process(pdf_path: Path, output_dir: Path | None, **kwargs) -> None:
+def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = False, **kwargs) -> None:
     """Process a single PDF document.
 
     Uses cascading fallback: primary engine first, quality audit,
@@ -114,11 +115,20 @@ def process(pdf_path: Path, output_dir: Path | None, **kwargs) -> None:
     Example:
         smart-ocr process paper.pdf -o ./results/
         smart-ocr paper.pdf --primary gemini --quiet
+        smart-ocr paper.pdf --hpc-sequential --save-figures
     """
-    from smart_ocr.pipeline.processor import StandardPipeline
-
     config = build_config(output_dir=output_dir, **kwargs)
-    pipeline = StandardPipeline(config)
+
+    if hpc_sequential:
+        from smart_ocr.pipeline.hpc_pipeline import HPCPipeline
+
+        config.hpc.enabled = True
+        config.hpc.sequential = True
+        pipeline = HPCPipeline(config)
+    else:
+        from smart_ocr.pipeline.processor import StandardPipeline
+
+        pipeline = StandardPipeline(config)
 
     try:
         result = pipeline.process(pdf_path, output_dir)

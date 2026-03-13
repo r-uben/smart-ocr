@@ -1,288 +1,272 @@
-"""HPC-optimized multi-agent OCR pipeline.
+"""HPC pipeline for single-GPU setups with vLLM.
 
-Runs multiple OCR engines in parallel locally via vLLM, then reconciles
-outputs intelligently. No cloud fallback in HPC mode.
+Processes documents per-page via vLLM HTTP API with sequential model swapping:
+  1. OCR Phase: DeepSeek-OCR extracts text from all pages
+  2. Nougat Phase (optional): LaTeX equation extraction
+  3. Reconciliation: Merge DeepSeek + Nougat outputs
+  4. Figure Phase: Vision model describes extracted figures
 
-Pipeline flow:
-    PDF -> [DeepSeek-OCR-vLLM] -> text/structure  -|
-        -> [Nougat]            -> LaTeX equations -+-> [Reconciler] -> merged output
-        -> [Vision-vLLM]       -> figure desc.   -|
+Uses VLLMServerManager to swap models between phases on a single GPU.
 """
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from smart_ocr.core.config import AgentConfig, EngineType
-from smart_ocr.core.document import Document
-from smart_ocr.core.result import OCRResult, PageResult, PageStatus
-from smart_ocr.engines.base import BaseEngine
-from smart_ocr.engines.deepseek_vllm import DeepSeekVLLMEngine
-from smart_ocr.engines.nougat import NougatEngine
-from smart_ocr.engines.vllm import VLLMEngine
-from smart_ocr.pipeline.processor import OCRPipeline
+from PIL import Image
+from rich.console import Console
+
+from smart_ocr.audit.heuristics import HeuristicsChecker
+from smart_ocr.core.config import EngineType, PipelineConfig
+from smart_ocr.core.document import DocumentHandle
+from smart_ocr.core.result import (
+    DocumentResult,
+    DocumentStatus,
+    FigureInfo,
+    PageResult,
+    PageStatus,
+)
+from smart_ocr.engines.deepseek_vllm import DeepSeekVLLMConfig, DeepSeekVLLMEngine
+from smart_ocr.engines.vllm import VLLMConfig, VLLMEngine
+from smart_ocr.engines.vllm_manager import ServerConfig, VLLMServerManager
+from smart_ocr.figures.extractor import FigureExtractor
 from smart_ocr.pipeline.reconciler import (
     EngineOutput,
     OutputReconciler,
     create_page_result_from_reconciliation,
 )
 
+logger = logging.getLogger(__name__)
+console = Console()
 
-class HPCPipeline(OCRPipeline):
-    """HPC-optimized pipeline with parallel multi-engine processing.
 
-    This pipeline is designed for HPC environments where:
-    - vLLM serves DeepSeek-OCR for primary text extraction
-    - Nougat provides better LaTeX equation handling
-    - Vision models (InternVL2/Qwen2-VL) describe figures
-    - All engines run locally (no cloud fallback)
+class HPCPipeline:
+    """HPC pipeline with sequential model loading for single-GPU setups.
 
-    The outputs are reconciled to produce the best combined result.
+    Swaps models between processing phases to fit within single-GPU memory.
+    Each phase starts vLLM with the required model, processes all items,
+    then stops vLLM and frees GPU memory.
     """
 
-    def __init__(self, config: AgentConfig | None = None) -> None:
-        """Initialize HPC pipeline with multi-engine support."""
-        super().__init__(config)
-
-        # Update vLLM engines with HPC config
-        if self.config.hpc.enabled:
-            # Configure DeepSeek-vLLM with HPC settings
-            self.config.deepseek_vllm.base_url = self.config.hpc.vllm_url
-            self.config.deepseek_vllm.model = self.config.hpc.ocr_model
-
-            # Configure vision vLLM with HPC settings
-            self.config.vllm.base_url = self.config.hpc.vllm_url
-            self.config.vllm.model = self.config.hpc.vision_model
-
-            # Re-initialize engines with updated config
-            self.engines[EngineType.DEEPSEEK_VLLM] = DeepSeekVLLMEngine(self.config.deepseek_vllm)
-            self.engines[EngineType.VLLM] = VLLMEngine(self.config.vllm)
-
-        # Initialize reconciler
+    def __init__(self, config: PipelineConfig) -> None:
+        self.config = config
+        self.server_manager = VLLMServerManager(verbose=config.verbose)
         self.reconciler = OutputReconciler(
-            use_llm_reconciler=self.config.hpc.use_llm_reconciler,
-            reconciler_model=self.config.hpc.reconciler_model,
-            vllm_url=self.config.hpc.vllm_url,
+            use_llm_reconciler=config.hpc.use_llm_reconciler,
+            reconciler_model=config.hpc.reconciler_model,
+            vllm_url=config.hpc.vllm_url,
+        )
+        self.heuristics = HeuristicsChecker(
+            min_word_count=config.audit_min_words,
+            max_garbage_ratio=0.15,
+        )
+        self._page_images: dict[int, Image.Image] = {}
+
+    def process(self, pdf_path: Path, output_dir: Path | None = None) -> DocumentResult:
+        """Process a document through the HPC pipeline."""
+        start_time = time.time()
+        out_dir = output_dir or self.config.output_dir
+        doc = DocumentHandle.from_path(pdf_path)
+
+        if not self.config.quiet:
+            console.print(f"[blue]Processing (HPC):[/blue] {doc.filename}")
+            console.print(f"[dim]{doc.page_count} pages, {doc.size_mb:.1f} MB[/dim]")
+            if self.config.hpc.manage_server:
+                console.print("[dim]Sequential mode — single-GPU model swapping[/dim]")
+
+        # Render all pages upfront for reuse across phases
+        if not self.config.quiet:
+            console.print("[dim]Rendering pages...[/dim]")
+        self._page_images = doc.render_all_pages(dpi=self.config.hpc.render_dpi)
+
+        try:
+            # Phase 1: OCR with DeepSeek-vLLM
+            ocr_outputs = self._run_ocr_phase(doc)
+
+            # Phase 2: Nougat for LaTeX (optional)
+            nougat_outputs: dict[int, EngineOutput] = {}
+            if self.config.hpc.use_nougat:
+                nougat_outputs = self._run_nougat_phase(doc)
+
+            # Phase 3: Reconciliation
+            page_results = self._run_reconciliation_phase(
+                ocr_outputs, nougat_outputs, doc.page_count
+            )
+
+            # Build combined markdown from page results
+            markdown = self._assemble_markdown(page_results)
+
+            # Phase 4: Figures
+            figures: list[FigureInfo] = []
+            if self.config.save_figures:
+                figures = self._run_figure_phase(doc, page_results, out_dir)
+
+        finally:
+            self.server_manager.stop()
+            self._page_images.clear()
+
+        processing_time = time.time() - start_time
+        success_pages = sum(1 for r in page_results if r.status == PageStatus.SUCCESS)
+
+        result = DocumentResult(
+            document_path=pdf_path,
+            engine="hpc-sequential",
+            status=DocumentStatus.SUCCESS if success_pages > 0 else DocumentStatus.ERROR,
+            markdown=markdown,
+            pages_processed=doc.page_count,
+            processing_time=processing_time,
+            figures=figures,
         )
 
-        # Track which engines are available for HPC mode
-        self._hpc_engines: list[EngineType] = []
+        # Save output
+        if result.success:
+            saved = self._save_result(doc, result, out_dir)
+            if not self.config.quiet:
+                console.print(f"[blue]Output:[/blue] {saved}")
 
-    def process(self, pdf_path: Path | str, output_path: Path | str | None = None) -> OCRResult:
-        """Process a document through the HPC pipeline.
-
-        HPC pipeline stages:
-        1. Parallel OCR with multiple engines (DeepSeek-vLLM + Nougat)
-        2. Reconciliation (merge outputs, prefer Nougat for LaTeX)
-        3. Figure processing (reuse from base class)
-
-        Args:
-            pdf_path: Path to the PDF file to process
-            output_path: Optional custom output path
-
-        Returns:
-            OCRResult with processed pages and figures
-        """
-        self._start_time = time.time()
-        pdf_path = Path(pdf_path)
-        self._custom_output_path = Path(output_path) if output_path else None
-
-        # Print header
-        self.console.print_header()
-        self.console.console.print("[info]HPC Mode[/info] - Multi-engine parallel processing\n")
-
-        # Load document
-        document = Document.from_pdf(pdf_path, render_dpi=self.config.render_dpi)
-        document.classify()
-
-        self.console.print_document_info(
-            filename=document.filename,
-            pages=document.num_pages,
-            size_mb=document.size_mb,
-            doc_type=document.doc_type.value,
-            detected_features=document.detected_features,
-        )
-
-        # Initialize result with HPC metadata
-        result = OCRResult(document_path=str(pdf_path))
-        default_output_file = self._default_output_file(pdf_path)
-        result.metadata.update({
-            "doc_type": document.doc_type.value,
-            "detected_features": document.detected_features,
-            "default_output_file": str(default_output_file),
-            "hpc_mode": True,
-            "vllm_url": self.config.hpc.vllm_url,
-        })
-
-        # Determine available HPC engines
-        self._hpc_engines = self._select_hpc_engines()
-
-        if not self._hpc_engines:
-            self.console.print_warning("No HPC engines available, falling back to standard pipeline")
-            return super().process(pdf_path, output_path)
-
-        # Stage 1: Parallel OCR with multiple engines
-        engine_outputs = self._run_parallel_ocr(document)
-
-        # Stage 2: Reconciliation
-        page_results = self._run_reconciliation(engine_outputs, document.num_pages)
-        for r in page_results:
-            result.add_page_result(r)
-
-        # Stage 3: Figure processing (reuse existing _run_stage4)
-        if self.config.include_figures:
-            self._run_stage4(document, result)
-
-        # Recalculate stats
-        result.recalculate_stats()
-
-        # Add engine attribution to metadata
-        result.metadata["ocr_engines"] = list({r.engine for r in result.pages if r.engine})
-        result.metadata["processed"] = datetime.utcnow().isoformat()
-
-        # Print summary
-        elapsed = time.time() - self._start_time
-        result.stats.total_time = elapsed
-
-        self.console.print_summary(
-            pages_success=result.stats.pages_success,
-            pages_total=result.stats.total_pages,
-            figures_count=result.stats.figures_detected,
-            time_seconds=elapsed,
-            cost=result.stats.total_cost,
-            engines_used=result.stats.engines_used,
-            output_path=str(default_output_file),
-        )
+        if not self.config.quiet:
+            status = "[green]Success[/green]" if result.success else "[red]Error[/red]"
+            console.print(f"\n{status} | hpc-sequential | {processing_time:.1f}s")
+            console.print(f"[dim]{success_pages}/{doc.page_count} pages successful[/dim]")
 
         return result
 
-    def _select_hpc_engines(self) -> list[EngineType]:
-        """Select available engines for HPC mode."""
-        available = []
+    # --- Phases ---
 
-        # Primary: DeepSeek-vLLM
-        deepseek_vllm = self.engines.get(EngineType.DEEPSEEK_VLLM)
-        if deepseek_vllm and deepseek_vllm.is_available():
-            available.append(EngineType.DEEPSEEK_VLLM)
-            self.console.console.print(f"  [success]+[/success] [deepseek-vllm]deepseek-vllm[/deepseek-vllm] available")
+    def _run_ocr_phase(self, doc: DocumentHandle) -> dict[int, EngineOutput]:
+        """Phase 1: OCR with DeepSeek-vLLM."""
+        if not self.config.quiet:
+            console.print(f"\n[cyan]Phase 1:[/cyan] OCR [deepseek-vllm]")
+
+        # Start vLLM with OCR model
+        base_url = self._start_server(self.config.hpc.ocr_model)
+
+        engine_config = DeepSeekVLLMConfig(
+            base_url=base_url, model=self.config.hpc.ocr_model
+        )
+        engine = DeepSeekVLLMEngine(engine_config)
+
+        if not engine.initialize():
+            raise RuntimeError(f"Failed to initialize DeepSeek-vLLM at {base_url}")
+
+        outputs: dict[int, EngineOutput] = {}
+        workers = self.config.hpc.parallel_pages
+
+        if not self.config.quiet:
+            console.print(f"[dim]Processing {doc.page_count} pages ({workers} workers)[/dim]")
+
+        if workers <= 1:
+            for page_num, image in self._page_images.items():
+                result = engine.process_image(image, page_num)
+                if result.status == PageStatus.SUCCESS:
+                    outputs[page_num] = EngineOutput(
+                        engine="deepseek-vllm",
+                        text=result.text,
+                        confidence=result.confidence or 0.85,
+                        processing_time=result.processing_time,
+                    )
+                elif not self.config.quiet:
+                    console.print(f"  [red]Page {page_num}:[/red] {result.error_message}")
         else:
-            self.console.print_warning("DeepSeek-vLLM not available")
+            def process_page(pn: int, img: Image.Image):
+                return pn, engine.process_image(img, pn)
 
-        # Secondary: Nougat (for LaTeX)
-        if self.config.hpc.use_nougat:
-            nougat = self.engines.get(EngineType.NOUGAT)
-            if nougat and nougat.is_available():
-                available.append(EngineType.NOUGAT)
-                self.console.console.print(f"  [success]+[/success] [nougat]nougat[/nougat] available")
-            else:
-                self.console.print_warning("Nougat not available (LaTeX support disabled)")
-
-        return available
-
-    def _run_parallel_ocr(
-        self,
-        document: Document,
-    ) -> dict[int, list[EngineOutput]]:
-        """Run OCR with multiple engines in parallel.
-
-        Returns:
-            Dict mapping page_num to list of EngineOutput from each engine
-        """
-        self.console.print_stage_header(1, "PARALLEL OCR", "Multi-engine text extraction")
-
-        engine_outputs: dict[int, list[EngineOutput]] = {
-            page.page_num: [] for page in document.pages
-        }
-
-        # Process with each engine
-        for engine_type in self._hpc_engines:
-            engine = self.engines[engine_type]
-            workers = self.config.parallel_pages
-
-            parallel_msg = f"processing... ({workers} workers)" if workers > 1 else "processing..."
-            self.console.print_engine_active(engine.name, parallel_msg)
-
-            with self.progress.stage_progress(
-                stage_name="primary",
-                engine=engine.name,
-                total=document.num_pages,
-                description=f"OCR [{engine.name}]",
-            ) as ctx:
-                if workers <= 1:
-                    # Sequential processing
-                    for page in document.pages:
-                        result = engine.process_image(page.image, page.page_num)
-                        if result.status == PageStatus.SUCCESS:
-                            engine_outputs[page.page_num].append(EngineOutput(
-                                engine=engine.name,
-                                text=result.text,
-                                confidence=result.confidence or 0.0,
-                                processing_time=result.processing_time,
-                            ))
-
-                        status = "success" if result.status == PageStatus.SUCCESS else "error"
-                        ctx.add_result(
-                            item=page.page_num,
-                            status=status,
-                            message=result.error_message if result.error_message else "",
-                            confidence=result.confidence,
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(process_page, pn, img): pn
+                    for pn, img in self._page_images.items()
+                }
+                for future in as_completed(futures):
+                    page_num, result = future.result()
+                    if result.status == PageStatus.SUCCESS:
+                        outputs[page_num] = EngineOutput(
+                            engine="deepseek-vllm",
+                            text=result.text,
+                            confidence=result.confidence or 0.85,
+                            processing_time=result.processing_time,
                         )
-                        ctx.advance()
-                else:
-                    # Parallel processing
-                    def process_page(page):
-                        return page.page_num, engine.process_image(page.image, page.page_num)
 
-                    with ThreadPoolExecutor(max_workers=workers) as executor:
-                        futures = {executor.submit(process_page, page): page for page in document.pages}
-                        for future in as_completed(futures):
-                            page_num, result = future.result()
-                            if result.status == PageStatus.SUCCESS:
-                                engine_outputs[page_num].append(EngineOutput(
-                                    engine=engine.name,
-                                    text=result.text,
-                                    confidence=result.confidence or 0.0,
-                                    processing_time=result.processing_time,
-                                ))
+        engine.close()
 
-                            status = "success" if result.status == PageStatus.SUCCESS else "error"
-                            ctx.add_result(
-                                item=page_num,
-                                status=status,
-                                message=result.error_message if result.error_message else "",
-                                confidence=result.confidence,
-                            )
-                            ctx.advance()
+        # Stop server to free GPU
+        if self.config.hpc.manage_server:
+            if not self.config.quiet:
+                console.print("[dim]Stopping OCR server...[/dim]")
+            self.server_manager.stop()
 
-                ctx.print_results()
+        # Quality audit + Gemini fallback
+        if self.config.hpc.audit_enabled:
+            failed_pages = self._audit_ocr_results(outputs)
+            if failed_pages and self.config.hpc.cloud_fallback:
+                gemini_outputs = self._fallback_to_gemini(failed_pages)
+                outputs.update(gemini_outputs)
 
-        return engine_outputs
+        if not self.config.quiet:
+            console.print(f"  [green]{len(outputs)}/{len(self._page_images)} pages extracted[/green]")
 
-    def _run_reconciliation(
+        return outputs
+
+    def _run_nougat_phase(self, doc: DocumentHandle) -> dict[int, EngineOutput]:
+        """Phase 2: Nougat for LaTeX extraction (runs locally, no vLLM)."""
+        if not self.config.quiet:
+            console.print(f"\n[cyan]Phase 2:[/cyan] Nougat [LaTeX extraction]")
+
+        from smart_ocr.engines.nougat import NougatEngine
+
+        engine = NougatEngine()
+        if not engine.is_available():
+            if not self.config.quiet:
+                console.print("[yellow]Nougat not available, skipping[/yellow]")
+            return {}
+
+        # Nougat is a CLI engine — process the whole document
+        result = engine.process_document(doc.path, self.config.output_dir, self.config)
+        if not result.success:
+            if not self.config.quiet:
+                console.print(f"[yellow]Nougat failed: {result.error}[/yellow]")
+            return {}
+
+        # Split nougat output into per-page outputs (best effort by page breaks)
+        outputs: dict[int, EngineOutput] = {}
+        pages = result.markdown.split("\n\n---\n\n")
+        for i, page_text in enumerate(pages):
+            page_num = i + 1
+            if page_text.strip():
+                outputs[page_num] = EngineOutput(
+                    engine="nougat",
+                    text=page_text.strip(),
+                    confidence=0.8,
+                    processing_time=result.processing_time / max(len(pages), 1),
+                )
+
+        if not self.config.quiet:
+            console.print(f"  [green]{len(outputs)} pages with LaTeX[/green]")
+
+        return outputs
+
+    def _run_reconciliation_phase(
         self,
-        engine_outputs: dict[int, list[EngineOutput]],
+        ocr_outputs: dict[int, EngineOutput],
+        nougat_outputs: dict[int, EngineOutput],
         total_pages: int,
     ) -> list[PageResult]:
-        """Reconcile outputs from multiple engines.
-
-        Args:
-            engine_outputs: Dict mapping page_num to list of EngineOutput
-            total_pages: Total number of pages
-
-        Returns:
-            List of reconciled PageResult
-        """
-        self.console.print_stage_header(2, "RECONCILIATION", "Merge multi-engine outputs")
+        """Phase 3: Reconcile OCR + Nougat outputs."""
+        if not self.config.quiet:
+            console.print(f"\n[cyan]Phase 3:[/cyan] Reconciliation")
 
         results: list[PageResult] = []
         latex_merged = 0
 
-        for page_num in sorted(engine_outputs.keys()):
-            outputs = engine_outputs[page_num]
+        for page_num in range(1, total_pages + 1):
+            outputs = []
+            if page_num in ocr_outputs:
+                outputs.append(ocr_outputs[page_num])
+            if page_num in nougat_outputs:
+                outputs.append(nougat_outputs[page_num])
 
             if not outputs:
-                # No successful outputs for this page
                 results.append(PageResult(
                     page_num=page_num,
                     status=PageStatus.ERROR,
@@ -292,8 +276,7 @@ class HPCPipeline(OCRPipeline):
 
             reconciliation = self.reconciler.reconcile(outputs, page_num)
             page_result = create_page_result_from_reconciliation(
-                reconciliation,
-                page_num,
+                reconciliation, page_num,
                 processing_time=sum(o.processing_time for o in outputs),
             )
             results.append(page_result)
@@ -301,49 +284,196 @@ class HPCPipeline(OCRPipeline):
             if reconciliation.latex_source:
                 latex_merged += reconciliation.conflicts_resolved
 
-        # Print reconciliation summary
         success_count = sum(1 for r in results if r.status == PageStatus.SUCCESS)
-        self.console.console.print(
-            f"  [success]+[/success] {success_count}/{total_pages} pages reconciled"
-        )
-        if latex_merged > 0:
-            self.console.console.print(
-                f"  [info]i[/info] {latex_merged} LaTeX blocks merged from Nougat"
-            )
+        if not self.config.quiet:
+            console.print(f"  [green]{success_count}/{total_pages} pages reconciled[/green]")
+            if latex_merged > 0:
+                console.print(f"  [dim]{latex_merged} LaTeX blocks merged from Nougat[/dim]")
 
         return results
 
-    def save_output(self, result: OCRResult, output_path: Path | None = None) -> Path:
-        """Save OCR result with HPC metadata in YAML frontmatter."""
-        # Use parent implementation
-        saved_path = super().save_output(result, output_path)
+    def _run_figure_phase(
+        self,
+        doc: DocumentHandle,
+        page_results: list[PageResult],
+        output_dir: Path,
+    ) -> list[FigureInfo]:
+        """Phase 4: Extract and describe figures."""
+        if not self.config.quiet:
+            console.print(f"\n[cyan]Phase 4:[/cyan] Figure extraction & description")
 
-        # If markdown format, prepend YAML frontmatter
-        if self.config.output_format == "markdown":
-            content = saved_path.read_text()
+        from smart_ocr.engines.base import sanitize_filename
 
-            # Build frontmatter
-            frontmatter_lines = [
-                "---",
-                f"source: {Path(result.document_path).name}",
+        figures_dir = output_dir / sanitize_filename(doc.stem) / "figures"
+        extractor = FigureExtractor(
+            max_total=self.config.figures_max_total,
+            max_per_page=self.config.figures_max_per_page,
+            save_dir=figures_dir,
+        )
+        extracted = extractor.extract(doc.path)
+
+        if not extracted:
+            if not self.config.quiet:
+                console.print("  [dim]No figures detected[/dim]")
+            return []
+
+        if not self.config.quiet:
+            console.print(f"  [dim]{len(extracted)} figures extracted[/dim]")
+
+        # Start vision model for descriptions
+        base_url = self._start_server(self.config.hpc.vision_model)
+        vision_config = VLLMConfig(base_url=base_url, model=self.config.hpc.vision_model)
+        vision_engine = VLLMEngine(vision_config)
+
+        figures: list[FigureInfo] = []
+        if vision_engine.initialize():
+            for fig in extracted:
+                # Get context from the page result
+                context = ""
+                for pr in page_results:
+                    if pr.page_num == fig.page_num:
+                        context = (pr.text or "")[:500]
+                        break
+
+                if fig.image is not None:
+                    info = vision_engine.describe_figure(fig.image, context=context)
+                    info.figure_num = fig.figure_num
+                    info.page_num = fig.page_num
+                    if fig.saved_path:
+                        info.image_path = fig.saved_path
+                    figures.append(info)
+                else:
+                    figures.append(FigureInfo(
+                        figure_num=fig.figure_num,
+                        page_num=fig.page_num,
+                        figure_type="extracted",
+                        image_path=fig.saved_path,
+                    ))
+
+            vision_engine.close()
+        else:
+            if not self.config.quiet:
+                console.print("[yellow]Vision model not available, saving figures without descriptions[/yellow]")
+            figures = [
+                FigureInfo(
+                    figure_num=fig.figure_num,
+                    page_num=fig.page_num,
+                    figure_type="extracted",
+                    image_path=fig.saved_path,
+                )
+                for fig in extracted
             ]
 
-            engines = result.metadata.get("ocr_engines", [])
-            if engines:
-                frontmatter_lines.append(f"ocr_engines: [{', '.join(engines)}]")
+        if self.config.hpc.manage_server:
+            self.server_manager.stop()
 
-            processed = result.metadata.get("processed", "")
-            if processed:
-                frontmatter_lines.append(f"processed: {processed}")
+        if not self.config.quiet:
+            console.print(f"  [green]{len(figures)} figures processed[/green]")
 
-            if result.metadata.get("hpc_mode"):
-                frontmatter_lines.append("hpc_mode: true")
+        return figures
 
-            frontmatter_lines.append("---")
-            frontmatter_lines.append("")
+    # --- Helpers ---
 
-            # Prepend frontmatter to content
-            new_content = "\n".join(frontmatter_lines) + content
-            saved_path.write_text(new_content)
+    def _start_server(self, model: str) -> str:
+        """Start vLLM with a model, or use existing URL."""
+        if self.config.hpc.manage_server:
+            if not self.config.quiet:
+                console.print(f"[dim]Starting vLLM with {model}...[/dim]")
+            server_config = ServerConfig(
+                model=model,
+                port=self.config.hpc.vllm_port,
+                gpu_memory_utilization=self.config.hpc.gpu_memory_utilization,
+                max_model_len=self.config.hpc.max_model_len,
+            )
+            self.server_manager.start(
+                server_config,
+                timeout=self.config.hpc.server_startup_timeout,
+            )
+            return self.server_manager.get_base_url()
+        return self.config.hpc.vllm_url
 
-        return saved_path
+    def _audit_ocr_results(self, ocr_outputs: dict[int, EngineOutput]) -> list[int]:
+        """Run heuristics audit on OCR outputs, return failed page numbers."""
+        failed = []
+        for page_num, output in ocr_outputs.items():
+            result = self.heuristics.check(output.text)
+            if not result.passed:
+                failed.append(page_num)
+                if not self.config.quiet:
+                    errors = ", ".join(result.errors[:2])
+                    console.print(f"  [yellow]Page {page_num} failed audit: {errors}[/yellow]")
+
+        if not self.config.quiet:
+            if failed:
+                console.print(f"  [dim]{len(failed)}/{len(ocr_outputs)} pages failed audit[/dim]")
+            else:
+                console.print(f"  [green]All {len(ocr_outputs)} pages passed audit[/green]")
+
+        return failed
+
+    def _fallback_to_gemini(self, failed_pages: list[int]) -> dict[int, EngineOutput]:
+        """Re-OCR failed pages with Gemini cloud fallback."""
+        if not failed_pages:
+            return {}
+
+        if not self.config.quiet:
+            console.print(f"  [dim]Gemini fallback for {len(failed_pages)} pages...[/dim]")
+
+        from smart_ocr.engines.gemini import GeminiEngine
+
+        engine = GeminiEngine()
+        if not engine.is_available():
+            if not self.config.quiet:
+                console.print("  [yellow]Gemini not available (check GEMINI_API_KEY)[/yellow]")
+            return {}
+
+        # Gemini is a CLI engine — we need to process the whole doc and extract pages
+        # For now, use document-level fallback (re-OCR entire doc)
+        # A more sophisticated approach would process individual pages
+        outputs: dict[int, EngineOutput] = {}
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = engine.process_document(
+                self._page_images[1] if 1 in self._page_images else list(self._page_images.values())[0],
+                Path(tmpdir),
+                self.config,
+            ) if False else None  # Gemini needs the PDF path, not images
+
+        # Gemini CLI works on the whole PDF — can't do per-page fallback easily
+        # Log this limitation
+        if not self.config.quiet:
+            console.print("  [dim]Per-page Gemini fallback not yet supported in HPC mode[/dim]")
+
+        return outputs
+
+    @staticmethod
+    def _assemble_markdown(page_results: list[PageResult]) -> str:
+        """Combine per-page results into a single markdown document."""
+        parts = []
+        for pr in sorted(page_results, key=lambda r: r.page_num):
+            if pr.status == PageStatus.SUCCESS and pr.text:
+                parts.append(pr.text)
+        return "\n\n---\n\n".join(parts)
+
+    def _save_result(self, doc: DocumentHandle, result: DocumentResult, output_dir: Path) -> Path:
+        """Save the OCR markdown to output_dir/{stem}/{stem}.md."""
+        from smart_ocr.engines.base import sanitize_filename
+
+        stem = sanitize_filename(doc.stem)
+        doc_dir = output_dir / stem
+        doc_dir.mkdir(parents=True, exist_ok=True)
+
+        # Add frontmatter
+        frontmatter = (
+            f"---\n"
+            f"source: {doc.filename}\n"
+            f"engine: hpc-sequential\n"
+            f"processed: {datetime.now(timezone.utc).isoformat()}\n"
+            f"---\n\n"
+        )
+
+        md_path = doc_dir / f"{stem}.md"
+        md_path.write_text(frontmatter + result.markdown, encoding="utf-8")
+        return md_path

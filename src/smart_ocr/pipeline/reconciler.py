@@ -329,5 +329,4 @@ def create_page_result_from_reconciliation(
         engine=f"reconciled({','.join(reconciliation.engines_used)})",
         confidence=reconciliation.confidence,
         processing_time=processing_time,
-        cost=0.0,
     )

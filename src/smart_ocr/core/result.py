@@ -28,6 +28,7 @@ class FigureInfo:
     figure_type: str  # chart, table, diagram, image
     description: str = ""
     image_path: str | None = None
+    engine: str = ""
 
 
 @dataclass
@@ -81,6 +82,7 @@ class PageResult:
     engine: str = ""
     processing_time: float = 0.0
     error_message: str = ""
+    confidence: float = 0.0
     figures: list[FigureInfo] = field(default_factory=list)
     audit_passed: bool = True
     audit_notes: list[str] = field(default_factory=list)

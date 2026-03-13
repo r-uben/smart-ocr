@@ -1,7 +1,8 @@
-"""Base engine adapter for smart-ocr v1.0.
+"""Base engine adapters for smart-ocr v1.0.
 
-Engines call their CLI once per document (one subprocess per PDF).
-No more per-page subprocess calls or PIL image passing.
+Two engine families:
+  - BaseEngine: CLI-based, one subprocess per document (standard mode)
+  - BaseHTTPEngine: HTTP API, per-page processing (HPC mode with vLLM)
 """
 
 import logging
@@ -12,7 +13,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from smart_ocr.core.config import PipelineConfig
-from smart_ocr.core.result import DocumentResult, DocumentStatus
+from smart_ocr.core.result import DocumentResult, DocumentStatus, FigureInfo, PageResult, PageStatus
 
 logger = logging.getLogger(__name__)
 
@@ -157,3 +158,74 @@ class BaseEngine(ABC):
             if len(parts) >= 3:
                 return parts[2].strip()
         return text
+
+
+class BaseHTTPEngine(ABC):
+    """Abstract base class for HTTP API engines (vLLM, HPC mode).
+
+    These engines call a local vLLM server per-page via OpenAI-compatible API.
+    They are NOT CLI-based — they use httpx to talk to a running server.
+    """
+
+    def __init__(self) -> None:
+        self._initialized: bool = False
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        ...
+
+    @abstractmethod
+    def initialize(self) -> bool:
+        """Connect to the server and verify it's ready."""
+        ...
+
+    def is_available(self) -> bool:
+        """Check if the engine can be initialized."""
+        return self._initialized or self.initialize()
+
+    @abstractmethod
+    def process_image(self, image: "Image.Image", page_num: int = 1) -> PageResult:
+        """Process a single page image and return text."""
+        ...
+
+    def describe_figure(
+        self,
+        image: "Image.Image",
+        figure_type: str = "unknown",
+        context: str = "",
+    ) -> FigureInfo:
+        """Describe a figure image. Override in subclasses that support this."""
+        return FigureInfo(
+            figure_num=0,
+            page_num=0,
+            figure_type=figure_type,
+            description="Figure description not supported by this engine",
+        )
+
+    def close(self) -> None:
+        """Clean up resources."""
+        pass
+
+    @staticmethod
+    def _create_success_result(
+        page_num: int,
+        text: str,
+        confidence: float = 0.0,
+        processing_time: float = 0.0,
+    ) -> PageResult:
+        return PageResult(
+            page_num=page_num,
+            text=text,
+            status=PageStatus.SUCCESS,
+            processing_time=processing_time,
+            confidence=confidence,
+        )
+
+    @staticmethod
+    def _create_error_result(page_num: int, error: str) -> PageResult:
+        return PageResult(
+            page_num=page_num,
+            status=PageStatus.ERROR,
+            error_message=error,
+        )

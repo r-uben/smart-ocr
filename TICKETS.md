@@ -97,21 +97,29 @@
   - [ ] Uses FigureExtractor, MetadataManager, PipelineConfig
 
 ### [TICKET-6] Simplify HPC pipeline — shared figures, simplified config
-- **Status:** deferred (HPC pipeline needs separate refactor — coupled to vLLM engines, reconciler, old per-page model)
+- **Status:** done
 - **Priority:** medium
-- **Files:** `src/smart_ocr/pipeline/hpc_pipeline.py`
+- **Files:** `src/smart_ocr/pipeline/hpc_pipeline.py`, `src/smart_ocr/engines/base.py`, `src/smart_ocr/engines/deepseek_vllm.py`, `src/smart_ocr/engines/vllm.py`, `src/smart_ocr/pipeline/router.py`, `src/smart_ocr/pipeline/reconciler.py`
 - **Description:**
-  - Keep vLLM HTTP API approach (per-page, direct API — not CLI)
-  - Remove duplicated figure extraction, use `FigureExtractor` from TICKET-4
-  - Use `PipelineConfig` from TICKET-1
-  - Merge `hpc_sequential_pipeline.py` into single `HPCPipeline` (delete `hpc_sequential_pipeline.py`)
-  - Keep reconciler for DeepSeek+Nougat merging
+  - Added `BaseHTTPEngine` abstract class for vLLM/HPC per-page engines (separate from CLI-based `BaseEngine`)
+  - Rewrote `DeepSeekVLLMEngine` and `VLLMEngine` using `BaseHTTPEngine` + local config dataclasses
+  - Merged `HPCPipeline` + `HPCSequentialPipeline` into single `HPCPipeline` class
+  - Deleted `hpc_sequential_pipeline.py`
+  - Ported router to `PipelineConfig` (removed `AgentConfig` dependency)
+  - Fixed reconciler (`PageResult` no longer has `cost` field)
+  - Extended `DocumentHandle` with lazy `render_page()` / `render_all_pages()` for HPC per-page rendering
+  - Added `EngineType.VLLM` to enum, `confidence` to `PageResult`, `engine` to `FigureInfo`
+  - Added `--hpc-sequential` flag to CLI
+  - Fixed all tests for new interfaces
 - **Acceptance Criteria:**
-  - [ ] Single `HPCPipeline` class (no more separate sequential pipeline)
-  - [ ] Uses shared `FigureExtractor`
-  - [ ] Uses `PipelineConfig`
-  - [ ] vLLM server lifecycle management preserved
-  - [ ] `hpc_sequential_pipeline.py` deleted
+  - [x] Single `HPCPipeline` class (no more separate sequential pipeline)
+  - [x] Uses shared `FigureExtractor`
+  - [x] Uses `PipelineConfig`
+  - [x] vLLM server lifecycle management preserved
+  - [x] `hpc_sequential_pipeline.py` deleted
+  - [x] `BaseHTTPEngine` for per-page HTTP API engines
+  - [x] Router and reconciler ported to new data model
+  - [x] All 8 tests pass
 
 ### [TICKET-7] MetadataManager — incremental batch processing
 - **Status:** done

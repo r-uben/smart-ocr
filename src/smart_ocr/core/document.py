@@ -55,6 +55,30 @@ class DocumentHandle:
                 h.update(chunk)
         return h.hexdigest()
 
+    def render_page(self, page_num: int, dpi: int = 200) -> "Image.Image":
+        """Render a single page to PIL Image on demand (1-indexed)."""
+        import fitz
+        from PIL import Image
+
+        with fitz.open(self.path) as pdf:
+            page = pdf[page_num - 1]
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            pix = page.get_pixmap(matrix=mat)
+            return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    def render_all_pages(self, dpi: int = 200) -> dict[int, "Image.Image"]:
+        """Render all pages to PIL Images. Returns {page_num: Image}."""
+        import fitz
+        from PIL import Image
+
+        images = {}
+        with fitz.open(self.path) as pdf:
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            for i in range(len(pdf)):
+                pix = pdf[i].get_pixmap(matrix=mat)
+                images[i + 1] = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        return images
+
     @classmethod
     def from_path(cls, path: Path | str) -> "DocumentHandle":
         """Create a DocumentHandle from a file path."""
