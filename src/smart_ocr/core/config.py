@@ -102,7 +102,7 @@ class PipelineConfig:
     deepseek_vllm_url: str = "http://localhost:8000/v1"
     nougat_model: str = "0.1.0-small"
     marker_device: str = "auto"
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3-flash-preview"
     mistral_model: str = "mistral-ocr-latest"
 
     def __post_init__(self) -> None:
