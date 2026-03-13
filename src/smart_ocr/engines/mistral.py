@@ -1,7 +1,7 @@
 """Mistral OCR engine adapter.
 
-CLI: mistral-ocr <path> -o <dir> [--model] [-q]
-Flat @click.command — no subcommands.
+CLI: mistral-ocr <path> -o <dir> [--model] [--reprocess]
+Flat @click.command — no subcommands. No -q flag.
 """
 
 import os
@@ -39,6 +39,4 @@ class MistralEngine(BaseEngine):
             "-o", str(output_dir),
             "--model", config.mistral_model,
         ]
-        if config.quiet:
-            cmd.append("-q")
         return cmd

@@ -1,7 +1,7 @@
 """DeepSeek OCR engine adapter.
 
-CLI: deepseek-ocr <path> -o <dir> [--backend ollama|vllm] [--vllm-url] [-q]
-Click group with auto-insert of 'process' — `deepseek-ocr paper.pdf` works.
+CLI: deepseek-ocr process <path> -o <dir> [--backend ollama|vllm] [--vllm-url]
+Click group — requires explicit 'process' subcommand.
 """
 
 from pathlib import Path
@@ -29,12 +29,10 @@ class DeepSeekEngine(BaseEngine):
     ) -> list[str]:
         cmd = [
             self.cli_command,
+            "process",
             str(pdf_path),
             "-o", str(output_dir),
-            "--backend", config.deepseek_backend,
         ]
         if config.deepseek_backend == "vllm":
             cmd.extend(["--vllm-url", config.deepseek_vllm_url])
-        if config.quiet:
-            cmd.append("-q")
         return cmd
