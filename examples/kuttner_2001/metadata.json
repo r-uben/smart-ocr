@@ -1,5 +1,5 @@
 {
-  "document": "/Users/rubenffuertes/Library/CloudStorage/GoogleDrive-fernandezfuertesruben@gmail.com/My Drive/Library/Papers/2001__kuttner__monetary_policy_surprises_and_interest_rates__JME.pdf",
+  "document": "2001__kuttner__monetary_policy_surprises_and_interest_rates__JME.pdf",
   "output_file": "examples/kuttner_2001/kuttner_2001.md",
   "format": "markdown",
   "created_at": "2025-12-23T21:55:09.821977Z",
@@ -9,19 +9,12 @@
     "pages_warning": 0,
     "pages_error": 0,
     "total_cost": 0.0002,
-    "total_time": 319.4657120704651
+    "total_time": 319.47
   },
   "engines_used": {
     "deepseek": 21,
     "gemini": 1
   },
   "figures": 3,
-  "pages_needing_reprocessing": [],
-  "document_metadata": {
-    "doc_type": "policy",
-    "detected_features": [
-      "policy_filename"
-    ],
-    "default_output_file": "output/2001__kuttner__monetary_policy_surprises_and_interest_rates__JME/2001__kuttner__monetary_policy_surprises_and_interest_rates__JME.md"
-  }
+  "pages_needing_reprocessing": []
 }

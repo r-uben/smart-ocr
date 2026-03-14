@@ -50,5 +50,10 @@ output/
 test_*.md
 /tmp/
 
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
 # Lock files (keep poetry.lock, ignore uv.lock)
 uv.lock
