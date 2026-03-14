@@ -154,6 +154,7 @@ class BaseEngine(ABC):
 
         # Fallback: find any .md file (handles sanitization mismatches)
         for md_file in output_dir.rglob("*.md"):
+            logger.warning(f"[{self.name}] Output found via rglob fallback: {md_file}")
             return self._clean_output(md_file.read_text(encoding="utf-8"))
 
         return None
@@ -176,9 +177,10 @@ class BaseEngine(ABC):
 
         # Strip metadata header block (mistral-ocr format):
         # # OCR Results\n\n**Original File:**...\n**Full Path:**...\n**Processed:**...\n\n---
+        # Requires at least one metadata line to avoid stripping real "# OCR Results" headings
         text = re.sub(
             r"^#\s*OCR Results\s*\n+"
-            r"(?:\*\*(?:Original File|Full Path|Processed|Processing Time):\*\*[^\n]*\n)*"
+            r"(?:\*\*(?:Original File|Full Path|Processed|Processing Time):\*\*[^\n]*\n)+"
             r"\s*(?:---\s*\n)?",
             "",
             text,

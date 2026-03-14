@@ -28,11 +28,8 @@ class DeepSeekEngine(BaseEngine):
         return "deepseek-ocr"
 
     def is_available(self) -> bool:
-        """Check CLI is installed and, for Ollama backend, that the model is pulled."""
-        if not super().is_available():
-            return False
-        # vLLM backend doesn't need Ollama model check
-        return True
+        """Check CLI is installed."""
+        return super().is_available()
 
     def check_ollama_model(self) -> str | None:
         """Check if the Ollama model is available. Returns error message or None."""
@@ -45,7 +42,15 @@ class DeepSeekEngine(BaseEngine):
             )
             if result.returncode != 0:
                 return "Ollama is not running or not installed"
-            if OLLAMA_MODEL not in result.stdout:
+            # Parse model names from first column of `ollama list` output
+            # Format: "NAME    ID    SIZE    MODIFIED"
+            model_names = []
+            for line in result.stdout.strip().splitlines()[1:]:  # skip header
+                parts = line.split()
+                if parts:
+                    name = parts[0].split(":")[0]  # strip :latest tag
+                    model_names.append(name)
+            if OLLAMA_MODEL not in model_names:
                 return (
                     f"Ollama model '{OLLAMA_MODEL}' not found. "
                     f"Pull it with: ollama pull {OLLAMA_MODEL}"
