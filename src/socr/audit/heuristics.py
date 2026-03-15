@@ -212,9 +212,20 @@ class HeuristicsChecker:
         return count
 
     def _check_llm_refusal(self, text: str) -> bool:
-        """Detect LLM refusal patterns indicating model couldn't process image."""
+        """Detect LLM refusal patterns indicating model couldn't process image.
+
+        Real refusals appear at the start of short output. A phrase like
+        "I am sorry" buried in page 30 of a long paper is legitimate text,
+        not a refusal. Only flag if text is short or the match is near the top.
+        """
+        words = text.split()
+        is_short = len(words) < 200
+
+        # For short text, scan the whole thing
+        search_text = text if is_short else text[:500]
+
         for pattern in self.REFUSAL_PATTERNS:
-            if re.search(pattern, text, re.IGNORECASE):
+            if re.search(pattern, search_text, re.IGNORECASE):
                 return True
         return False
 
