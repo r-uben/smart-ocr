@@ -122,7 +122,7 @@ class VLLMServerManager:
             self.current_port = config.port
 
             # Wait for server to be ready
-            if not self._wait_for_ready(config.port, timeout):
+            if not self._wait_for_ready(config.port, timeout, config.api_key):
                 self._print_logs()
                 self.stop()
                 raise RuntimeError(
@@ -196,17 +196,21 @@ class VLLMServerManager:
             raise RuntimeError("No server running")
         return f"http://localhost:{self.current_port}/v1"
 
-    def _wait_for_ready(self, port: int, timeout: int) -> bool:
+    def _wait_for_ready(self, port: int, timeout: int, api_key: str = "") -> bool:
         """Wait for server to be ready.
 
         Args:
             port: Server port
             timeout: Maximum seconds to wait
+            api_key: API key for authentication
 
         Returns:
             True if server is ready
         """
         url = f"http://localhost:{port}/v1/models"
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         start_time = time.time()
         check_interval = 2.0
 
@@ -217,7 +221,7 @@ class VLLMServerManager:
 
             try:
                 with httpx.Client(timeout=5.0) as client:
-                    response = client.get(url)
+                    response = client.get(url, headers=headers)
                     if response.status_code == 200:
                         return True
             except (httpx.ConnectError, httpx.TimeoutException):
