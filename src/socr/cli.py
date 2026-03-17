@@ -29,7 +29,7 @@ def common_options(f):
     f = click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")(f)
     f = click.option("--fallback", type=click.Choice(ENGINE_CHOICES), help="Fallback OCR engine")(f)
     f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
-    f = click.option("--timeout", type=int, default=300, help="Subprocess timeout in seconds")(f)
+    f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)

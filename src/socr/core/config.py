@@ -81,7 +81,7 @@ class PipelineConfig:
 
     # --- Processing ---
     output_dir: Path = field(default_factory=lambda: Path("output"))
-    timeout: int = 300  # Single timeout for all engine subprocesses
+    timeout: int = 1800  # Single timeout for all engine subprocesses
     max_retries: int = 2
     save_figures: bool = False
     figures_max_total: int = 25
