@@ -15,19 +15,21 @@ class EngineType(str, Enum):
     MISTRAL = "mistral"
     GEMINI = "gemini"
     MARKER = "marker"
+    GLM = "glm"  # GLM-OCR via Ollama or transformers (local)
     DEEPSEEK_VLLM = "deepseek-vllm"  # DeepSeek via vLLM HTTP API (HPC mode)
     VLLM = "vllm"  # Generic vLLM vision model (figures only, HPC mode)
 
 
 # Default engine priority: local free → cheap cloud → expensive cloud
 ENGINE_PRIORITY: dict[EngineType, int] = {
-    EngineType.NOUGAT: 0,
-    EngineType.DEEPSEEK: 1,
-    EngineType.MARKER: 2,
-    EngineType.GEMINI: 3,
-    EngineType.MISTRAL: 4,
-    EngineType.DEEPSEEK_VLLM: 5,
-    EngineType.VLLM: 6,
+    EngineType.GLM: 0,
+    EngineType.NOUGAT: 1,
+    EngineType.DEEPSEEK: 2,
+    EngineType.MARKER: 3,
+    EngineType.GEMINI: 4,
+    EngineType.MISTRAL: 5,
+    EngineType.DEEPSEEK_VLLM: 6,
+    EngineType.VLLM: 7,
 }
 
 
@@ -101,6 +103,7 @@ class PipelineConfig:
     # --- Engine-specific overrides (flat) ---
     deepseek_backend: str = "ollama"  # "ollama" or "vllm"
     deepseek_vllm_url: str = "http://localhost:8000/v1"
+    glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     nougat_model: str = "0.1.0-small"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"
@@ -139,7 +142,7 @@ class PipelineConfig:
             "timeout", "max_retries", "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
             "reprocess", "dry_run", "quiet", "verbose",
-            "deepseek_backend", "deepseek_vllm_url", "nougat_model",
+            "deepseek_backend", "deepseek_vllm_url", "glm_backend", "nougat_model",
             "marker_device", "gemini_model", "mistral_model",
         ]
         for key in scalar_fields:

@@ -4,11 +4,13 @@ from socr.core.config import EngineType
 from socr.engines.base import BaseEngine
 from socr.engines.deepseek import DeepSeekEngine
 from socr.engines.gemini import GeminiEngine
+from socr.engines.glm import GLMEngine
 from socr.engines.marker import MarkerEngine
 from socr.engines.mistral import MistralEngine
 from socr.engines.nougat import NougatEngine
 
 _ENGINES: dict[EngineType, type[BaseEngine]] = {
+    EngineType.GLM: GLMEngine,
     EngineType.NOUGAT: NougatEngine,
     EngineType.DEEPSEEK: DeepSeekEngine,
     EngineType.MISTRAL: MistralEngine,

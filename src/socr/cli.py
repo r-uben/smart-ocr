@@ -186,6 +186,7 @@ def engines() -> None:
     console.print("\n[bold]Engines[/bold]\n")
 
     engine_info = [
+        (EngineType.GLM, "local via Ollama (0.9B, ~10s/page)"),
         (EngineType.NOUGAT, "local, academic papers"),
         (EngineType.DEEPSEEK, "local via Ollama"),
         (EngineType.MARKER, "local, layout-aware (Surya + Texify)"),
