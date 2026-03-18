@@ -8,6 +8,7 @@ from socr.core.born_digital import (
 from socr.core.config import EngineType, HPCConfig, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
+from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -28,6 +29,7 @@ __all__ = [
     "FigureInfo",
     "HPCConfig",
     "MetadataManager",
+    "OutputNormalizer",
     "PageAssessment",
     "PageOutput",
     "PageStatus",
