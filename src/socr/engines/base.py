@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
+from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -23,6 +24,8 @@ from socr.core.result import (
 )
 
 logger = logging.getLogger(__name__)
+
+_normalizer = OutputNormalizer()
 
 
 def sanitize_filename(name: str) -> str:
@@ -174,12 +177,12 @@ class BaseEngine(ABC):
         # Try subdirectory layout first: {output_dir}/{stem}/{stem}.md
         md_path = output_dir / stem / f"{stem}.md"
         if md_path.exists():
-            return self._clean_output(md_path.read_text(encoding="utf-8"))
+            return self._clean_output(md_path.read_text(encoding="utf-8"), self.name)
 
         # Try flat layout: {output_dir}/{stem}.md
         flat_path = output_dir / f"{stem}.md"
         if flat_path.exists():
-            return self._clean_output(flat_path.read_text(encoding="utf-8"))
+            return self._clean_output(flat_path.read_text(encoding="utf-8"), self.name)
 
         # Fallback: find any .md file (handles sanitization mismatches)
         for md_file in output_dir.rglob("*.md"):
@@ -188,17 +191,19 @@ class BaseEngine(ABC):
                 logger.warning(f"[{self.name}] Skipping symlink outside output dir: {md_file}")
                 continue
             logger.warning(f"[{self.name}] Output found via rglob fallback: {md_file}")
-            return self._clean_output(md_file.read_text(encoding="utf-8"))
+            return self._clean_output(md_file.read_text(encoding="utf-8"), self.name)
 
         return None
 
     @staticmethod
-    def _clean_output(text: str) -> str:
-        """Remove frontmatter and metadata headers from CLI output.
+    def _clean_output(text: str, engine: str = "") -> str:
+        """Remove frontmatter, metadata headers, and normalize CLI output.
 
         Handles:
           - YAML frontmatter (--- ... ---)
           - Metadata headers (# OCR Results + **Original File:** + **Processed:** + ---)
+          - Engine-specific artifact cleanup (via OutputNormalizer)
+          - Generic markdown normalization (line endings, whitespace, unicode)
         """
         import re
 
@@ -218,6 +223,9 @@ class BaseEngine(ABC):
             "",
             text,
         ).strip()
+
+        # Apply engine-specific + generic normalization
+        text = _normalizer.normalize(text, engine=engine)
 
         return text
 
