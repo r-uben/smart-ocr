@@ -101,8 +101,22 @@ class DocumentState:
         Otherwise, stitch per-page best outputs, preferring native text for
         born-digital pages.
         """
-        # If only whole-doc attempts exist (CLI engines)
-        if not any(p.best_output for p in self.pages.values()) and self.whole_doc_attempts:
+        has_per_page = any(p.best_output for p in self.pages.values())
+        has_native = any(
+            p.is_born_digital and p.native_text for p in self.pages.values()
+        )
+
+        # If only whole-doc attempts exist (CLI engines) and at least one
+        # passed audit, use the best passing attempt.
+        if not has_per_page and self.whole_doc_attempts:
+            passing = [w for w in self.whole_doc_attempts if w.audit_passed]
+            if passing:
+                return passing[-1].text
+            # All whole-doc attempts failed audit. If we have born-digital
+            # native text, prefer that over truncated/failed OCR.
+            if has_native:
+                return self._assemble_native_text()
+            # Last resort: return the latest whole-doc attempt even if failed
             return self.whole_doc_attempts[-1].text
 
         texts: list[str] = []
@@ -112,6 +126,15 @@ class DocumentState:
                 texts.append(p.native_text)
             elif p.best_output:
                 texts.append(p.best_output.text)
+        return "\n\n---\n\n".join(texts)
+
+    def _assemble_native_text(self) -> str:
+        """Assemble document text from born-digital native text per page."""
+        texts: list[str] = []
+        for i in range(1, self.handle.page_count + 1):
+            p = self.pages[i]
+            if p.native_text:
+                texts.append(p.native_text)
         return "\n\n---\n\n".join(texts)
 
     @property
