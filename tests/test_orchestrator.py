@@ -813,3 +813,153 @@ class TestEdgeCases:
 
         # Engine was not called because it's unavailable
         mock_engine.process_document.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Chunking integration (Phase 2 with long PDFs)
+# ---------------------------------------------------------------------------
+
+class TestChunkedBackbone:
+    def test_short_pdf_not_chunked(self) -> None:
+        """PDFs under the threshold go through the normal path."""
+        config = _make_config(chunk_threshold=30, chunk_size=20)
+        pipeline = UnifiedPipeline(config)
+        # page_count=10 <= threshold=30, so no chunking
+        state = DocumentState(handle=_make_handle(10))
+
+        good_result = _make_engine_result(text=_good_text())
+
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = good_result
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        # Engine called once with the original path, no chunking
+        mock_engine.process_document.assert_called_once()
+        assert result.status == DocumentStatus.SUCCESS
+
+    def test_long_pdf_triggers_chunking(self) -> None:
+        """PDFs over the threshold get split and processed per-chunk."""
+        config = _make_config(chunk_threshold=30, chunk_size=20)
+        pipeline = UnifiedPipeline(config)
+        # page_count=50 > threshold=30, so chunking is triggered
+        state = DocumentState(handle=_make_handle(50))
+
+        chunk_result_1 = _make_engine_result(text="Chunk 1 text", engine="deepseek")
+        chunk_result_2 = _make_engine_result(text="Chunk 2 text", engine="deepseek")
+        chunk_result_3 = _make_engine_result(text="Chunk 3 text", engine="deepseek")
+
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.model_version = ""
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.side_effect = [
+            chunk_result_1, chunk_result_2, chunk_result_3,
+        ]
+
+        from socr.core.chunker import PDFChunk
+
+        fake_chunks = [
+            PDFChunk(chunk_num=1, start_page=1, end_page=20,
+                     path=Path("/tmp/c1.pdf"), page_count=20),
+            PDFChunk(chunk_num=2, start_page=21, end_page=40,
+                     path=Path("/tmp/c2.pdf"), page_count=20),
+            PDFChunk(chunk_num=3, start_page=41, end_page=50,
+                     path=Path("/tmp/c3.pdf"), page_count=10),
+        ]
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
+                mock_chunker = MockChunker.return_value
+                mock_chunker.max_pages_per_chunk = 20
+                mock_chunker.chunk.return_value = fake_chunks
+                result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        # Engine called 3 times -- once per chunk
+        assert mock_engine.process_document.call_count == 3
+        assert result.status == DocumentStatus.SUCCESS
+
+        # Text concatenated with separator
+        assert "Chunk 1 text" in result.markdown
+        assert "Chunk 2 text" in result.markdown
+        assert "Chunk 3 text" in result.markdown
+        assert "\n\n---\n\n" in result.markdown
+
+    def test_chunked_result_has_single_page_output(self) -> None:
+        """Chunked results should be concatenated into one PageOutput(page_num=0)."""
+        config = _make_config(chunk_threshold=30, chunk_size=20)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(40))
+
+        chunk_result = _make_engine_result(text="chunk text", engine="deepseek")
+
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.model_version = ""
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = chunk_result
+
+        from socr.core.chunker import PDFChunk
+
+        fake_chunks = [
+            PDFChunk(chunk_num=1, start_page=1, end_page=20,
+                     path=Path("/tmp/c1.pdf"), page_count=20),
+            PDFChunk(chunk_num=2, start_page=21, end_page=40,
+                     path=Path("/tmp/c2.pdf"), page_count=20),
+        ]
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
+                mock_chunker = MockChunker.return_value
+                mock_chunker.max_pages_per_chunk = 20
+                mock_chunker.chunk.return_value = fake_chunks
+                result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        # Single page_num=0 output
+        assert len(result.pages) == 1
+        assert result.pages[0].page_num == 0
+
+    def test_chunked_partial_failure_marks_error(self) -> None:
+        """If a chunk fails, the combined result should reflect that."""
+        config = _make_config(chunk_threshold=30, chunk_size=20)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(40))
+
+        good_chunk = _make_engine_result(text="Good chunk", engine="deepseek")
+        bad_chunk = EngineResult(
+            document_path=Path("/tmp/fake.pdf"),
+            engine="deepseek",
+            status=DocumentStatus.ERROR,
+            error="Timeout",
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.model_version = ""
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.side_effect = [good_chunk, bad_chunk]
+
+        from socr.core.chunker import PDFChunk
+
+        fake_chunks = [
+            PDFChunk(chunk_num=1, start_page=1, end_page=20,
+                     path=Path("/tmp/c1.pdf"), page_count=20),
+            PDFChunk(chunk_num=2, start_page=21, end_page=40,
+                     path=Path("/tmp/c2.pdf"), page_count=20),
+        ]
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
+                mock_chunker = MockChunker.return_value
+                mock_chunker.max_pages_per_chunk = 20
+                mock_chunker.chunk.return_value = fake_chunks
+                result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        assert result.status == DocumentStatus.ERROR
+        # Good chunk text is still present
+        assert "Good chunk" in result.markdown
+        # Placeholder for the failed chunk
+        assert "[OCR failed for pages 21-40]" in result.markdown

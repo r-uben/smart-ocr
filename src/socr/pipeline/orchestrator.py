@@ -14,6 +14,7 @@ structured loop that operates on the DocumentState blackboard.
 from __future__ import annotations
 
 import logging
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from rich.console import Console
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector
+from socr.core.chunker import PDFChunker
 from socr.core.config import PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
@@ -191,7 +193,14 @@ class UnifiedPipeline:
     def _phase_backbone(
         self, state: DocumentState, output_dir: Path
     ) -> EngineResult | None:
-        """Run the primary engine on the document."""
+        """Run the primary engine on the document.
+
+        If the document exceeds ``config.chunk_threshold`` pages, it is
+        split into chunks of ``config.chunk_size`` pages.  Each chunk is
+        OCR'd separately and the results are concatenated into a single
+        :class:`EngineResult` with one ``PageOutput(page_num=0)`` holding
+        the full text.
+        """
         engine = get_engine(self.config.primary_engine)
 
         if not self.config.quiet:
@@ -213,10 +222,91 @@ class UnifiedPipeline:
             state.apply_result(err_result)
             return err_result
 
-        result = engine.process_document(state.handle.path, output_dir, self.config)
+        # Decide whether to chunk based on the already-known page count
+        if state.handle.page_count > self.config.chunk_threshold:
+            chunker = PDFChunker(
+                max_pages_per_chunk=self.config.chunk_size,
+                threshold=self.config.chunk_threshold,
+            )
+            result = self._backbone_chunked(engine, state, output_dir, chunker)
+        else:
+            result = engine.process_document(
+                state.handle.path, output_dir, self.config
+            )
+
         result.pages_processed = state.handle.page_count
         state.apply_result(result)
         return result
+
+    def _backbone_chunked(
+        self,
+        engine: BaseEngine,
+        state: DocumentState,
+        output_dir: Path,
+        chunker: PDFChunker,
+    ) -> EngineResult:
+        """OCR a long PDF by splitting into chunks and concatenating results."""
+        start_time = time.time()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chunks = chunker.chunk(state.handle.path, tmp_path)
+
+            if not self.config.quiet:
+                console.print(
+                    f"  Chunked into {len(chunks)} segments "
+                    f"(up to {chunker.max_pages_per_chunk} pages each)"
+                )
+
+            chunk_texts: list[str] = []
+            total_cost = 0.0
+            any_error = False
+
+            for chunk in chunks:
+                if not self.config.quiet:
+                    console.print(
+                        f"  Processing chunk {chunk.chunk_num}/{len(chunks)} "
+                        f"(pages {chunk.start_page}-{chunk.end_page})"
+                    )
+
+                chunk_result = engine.process_document(
+                    chunk.path, tmp_path, self.config
+                )
+                total_cost += chunk_result.cost
+
+                if chunk_result.success:
+                    chunk_texts.append(chunk_result.markdown)
+                else:
+                    any_error = True
+                    logger.warning(
+                        f"Chunk {chunk.chunk_num} failed: {chunk_result.error}"
+                    )
+                    # Include a placeholder so page flow is clear
+                    chunk_texts.append(
+                        f"[OCR failed for pages {chunk.start_page}-{chunk.end_page}]"
+                    )
+
+        combined_text = "\n\n---\n\n".join(chunk_texts)
+        elapsed = time.time() - start_time
+
+        status = DocumentStatus.SUCCESS if not any_error else DocumentStatus.ERROR
+        return EngineResult(
+            document_path=state.handle.path,
+            engine=engine.name,
+            status=status,
+            pages=[
+                PageOutput(
+                    page_num=0,
+                    text=combined_text,
+                    status=PageStatus.SUCCESS if not any_error else PageStatus.WARNING,
+                    engine=engine.name,
+                    processing_time=elapsed,
+                )
+            ],
+            processing_time=elapsed,
+            cost=total_cost,
+            model_version=engine.model_version,
+        )
 
     # ------------------------------------------------------------------
     # Phase 3: Score

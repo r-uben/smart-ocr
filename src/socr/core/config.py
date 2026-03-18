@@ -87,6 +87,10 @@ class PipelineConfig:
     figures_max_total: int = 25
     figures_max_per_page: int = 3
 
+    # --- Chunking (long PDFs) ---
+    chunk_threshold: int = 30  # PDFs with more pages than this get chunked
+    chunk_size: int = 20  # pages per chunk
+
     # --- Audit ---
     audit_enabled: bool = True
     audit_min_words: int = 50
@@ -144,6 +148,7 @@ class PipelineConfig:
         scalar_fields = [
             "timeout", "max_retries", "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
+            "chunk_threshold", "chunk_size",
             "reprocess", "dry_run", "quiet", "verbose",
             "deepseek_backend", "deepseek_vllm_url", "glm_backend", "nougat_model",
             "marker_device", "gemini_model", "mistral_model",
