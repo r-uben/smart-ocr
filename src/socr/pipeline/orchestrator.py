@@ -443,9 +443,14 @@ class UnifiedPipeline:
         if not whole_doc_page:
             return
 
+        # When the backbone used chunking, each chunk was small enough to
+        # avoid truncation.  Skip the doc-level truncation check because
+        # dividing chunk output by total pages gives a misleadingly low
+        # words-per-page ratio.
+        was_chunked = state.handle.page_count > self.config.chunk_threshold
         scoring = self.scorer.score(
             whole_doc_page.text, engine=result.engine,
-            expected_pages=state.handle.page_count,
+            expected_pages=0 if was_chunked else state.handle.page_count,
         )
 
         if scoring.passed:
