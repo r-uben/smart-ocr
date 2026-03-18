@@ -17,7 +17,7 @@ from socr.audit.heuristics import HeuristicsChecker
 from socr.core.config import PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
-from socr.core.result import DocumentResult, DocumentStatus
+from socr.core.result import DocumentStatus, EngineResult
 from socr.engines.registry import get_engine
 from socr.figures.extractor import FigureExtractor
 
@@ -32,7 +32,7 @@ class StandardPipeline:
         self.config = config
         self.heuristics = HeuristicsChecker(min_word_count=config.audit_min_words)
 
-    def process(self, pdf_path: Path, output_dir: Path | None = None) -> DocumentResult:
+    def process(self, pdf_path: Path, output_dir: Path | None = None) -> EngineResult:
         """Process a single PDF through the full pipeline."""
         doc = DocumentHandle.from_path(pdf_path)
         out_dir = output_dir or self.config.output_dir
@@ -69,7 +69,7 @@ class StandardPipeline:
 
         return result
 
-    def process_batch(self, input_dir: Path, output_dir: Path | None = None) -> list[DocumentResult]:
+    def process_batch(self, input_dir: Path, output_dir: Path | None = None) -> list[EngineResult]:
         """Process all PDFs in a directory with incremental tracking."""
         out_dir = output_dir or self.config.output_dir
         meta = MetadataManager(out_dir)
@@ -131,7 +131,7 @@ class StandardPipeline:
 
     # --- Stages ---
 
-    def _run_primary(self, doc: DocumentHandle, output_dir: Path) -> DocumentResult:
+    def _run_primary(self, doc: DocumentHandle, output_dir: Path) -> EngineResult:
         """Stage 1: Primary OCR via CLI engine."""
         engine = get_engine(self.config.primary_engine)
 
@@ -142,7 +142,7 @@ class StandardPipeline:
             logger.warning(f"Primary engine {engine.name} not available")
             if not self.config.quiet:
                 console.print(f"[red]Engine {engine.name} not available[/red]")
-            return DocumentResult(
+            return EngineResult(
                 document_path=doc.path,
                 engine=engine.name,
                 status=DocumentStatus.ERROR,
@@ -153,7 +153,7 @@ class StandardPipeline:
         result.pages_processed = doc.page_count
         return result
 
-    def _run_audit(self, result: DocumentResult) -> bool:
+    def _run_audit(self, result: EngineResult) -> bool:
         """Stage 2: Quality audit on whole-document markdown. Returns True if passed."""
         if not self.config.quiet:
             console.print(f"\n[cyan]Stage 2:[/cyan] Quality audit")
@@ -172,7 +172,7 @@ class StandardPipeline:
 
         return check.passed
 
-    def _run_fallback(self, doc: DocumentHandle, output_dir: Path) -> DocumentResult | None:
+    def _run_fallback(self, doc: DocumentHandle, output_dir: Path) -> EngineResult | None:
         """Stage 3: Fallback OCR with a different engine."""
         if self.config.fallback_engine == self.config.primary_engine:
             logger.info("Fallback engine same as primary, skipping")
@@ -192,7 +192,7 @@ class StandardPipeline:
         result.pages_processed = doc.page_count
         return result
 
-    def _run_figures(self, doc: DocumentHandle, result: DocumentResult, output_dir: Path) -> None:
+    def _run_figures(self, doc: DocumentHandle, result: EngineResult, output_dir: Path) -> None:
         """Stage 4: Extract figure images from the PDF."""
         if not self.config.quiet:
             console.print(f"\n[cyan]Stage 4:[/cyan] Figure extraction")
@@ -224,7 +224,7 @@ class StandardPipeline:
             for fig in extracted
         ]
 
-    def _save_result(self, doc: DocumentHandle, result: DocumentResult, output_dir: Path) -> Path:
+    def _save_result(self, doc: DocumentHandle, result: EngineResult, output_dir: Path) -> Path:
         """Save the OCR markdown to output_dir/{stem}/{stem}.md."""
         from socr.engines.base import sanitize_filename
 
@@ -235,7 +235,7 @@ class StandardPipeline:
         md_path.write_text(result.markdown, encoding="utf-8")
         return md_path
 
-    def _print_summary(self, result: DocumentResult) -> None:
+    def _print_summary(self, result: EngineResult) -> None:
         status = "[green]Success[/green]" if result.success else f"[red]{result.status.value}[/red]"
         console.print(f"\n{status} | {result.engine} | {result.processing_time:.1f}s")
         if result.error:

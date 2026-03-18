@@ -1,7 +1,8 @@
-"""OCR result data structures for socr v1.0.
+"""OCR result data structures for socr.
 
-Document-level results for standard mode (CLI-based engines).
-Per-page results retained only for HPC mode (vLLM direct API).
+Canonical engine contract: all engines return EngineResult with structured
+PageOutput list. CLI engines produce a single PageOutput (page_num=0) with
+the full document text. HTTP engines produce per-page PageOutputs.
 """
 
 from dataclasses import dataclass, field
@@ -19,6 +20,35 @@ class DocumentStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class PageStatus(str, Enum):
+    """Status of per-page OCR."""
+
+    PENDING = "pending"
+    SUCCESS = "success"
+    WARNING = "warning"
+    ERROR = "error"
+    SKIPPED = "skipped"
+
+
+class FailureMode(str, Enum):
+    """Why an engine result or page failed.
+
+    Used by downstream repair routing to decide what fallback strategy to use.
+    """
+
+    NONE = "none"
+    TIMEOUT = "timeout"
+    CLI_ERROR = "cli_error"
+    EMPTY_OUTPUT = "empty_output"
+    API_ERROR = "api_error"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    AUDIT_FAILED = "audit_failed"
+    HALLUCINATION = "hallucination"
+    REFUSAL = "refusal"
+    GARBAGE = "garbage"
+    LOW_WORD_COUNT = "low_word_count"
+
+
 @dataclass
 class FigureInfo:
     """Metadata for a detected figure."""
@@ -32,56 +62,21 @@ class FigureInfo:
 
 
 @dataclass
-class DocumentResult:
-    """Result from processing a single document with one engine.
+class PageOutput:
+    """Structured output for a single page.
 
-    Standard mode: one engine runs on the whole PDF via CLI, produces markdown.
-    This replaces the per-page OCRResult for CLI-based engines.
+    For CLI engines that process whole documents at once, a single PageOutput
+    with page_num=0 holds the entire document text. For HTTP/per-page engines,
+    each page gets its own PageOutput.
     """
-
-    document_path: Path
-    engine: str
-    status: DocumentStatus = DocumentStatus.PENDING
-    markdown: str = ""
-    pages_processed: int = 0
-    processing_time: float = 0.0
-    error: str | None = None
-    figures: list[FigureInfo] = field(default_factory=list)
-    audit_passed: bool = True
-    audit_notes: list[str] = field(default_factory=list)
-
-    @property
-    def word_count(self) -> int:
-        return len(self.markdown.split()) if self.markdown else 0
-
-    @property
-    def success(self) -> bool:
-        return self.status == DocumentStatus.SUCCESS
-
-
-# --- HPC mode: per-page results (kept for vLLM direct API) ---
-
-
-class PageStatus(str, Enum):
-    """Status of per-page OCR (HPC mode only)."""
-
-    PENDING = "pending"
-    SUCCESS = "success"
-    WARNING = "warning"
-    ERROR = "error"
-    SKIPPED = "skipped"
-
-
-@dataclass
-class PageResult:
-    """Result for a single page (HPC mode — vLLM direct API)."""
 
     page_num: int
     text: str = ""
     status: PageStatus = PageStatus.PENDING
+    failure_mode: FailureMode = FailureMode.NONE
     engine: str = ""
     processing_time: float = 0.0
-    error_message: str = ""
+    error: str = ""
     confidence: float = 0.0
     figures: list[FigureInfo] = field(default_factory=list)
     audit_passed: bool = True
@@ -95,3 +90,44 @@ class PageResult:
         if self.status == PageStatus.ERROR:
             return True
         return not self.audit_passed
+
+
+@dataclass
+class EngineResult:
+    """Canonical result from any OCR engine.
+
+    Replaces raw markdown blobs with structured per-page outputs.
+    Engines return: status, failure_mode, pages, model_version, cost.
+    """
+
+    document_path: Path
+    engine: str
+    status: DocumentStatus = DocumentStatus.PENDING
+    failure_mode: FailureMode = FailureMode.NONE
+    pages: list[PageOutput] = field(default_factory=list)
+    model_version: str = ""
+    cost: float = 0.0
+    pages_processed: int = 0
+    processing_time: float = 0.0
+    error: str | None = None
+    figures: list[FigureInfo] = field(default_factory=list)
+    audit_passed: bool = True
+    audit_notes: list[str] = field(default_factory=list)
+
+    @property
+    def markdown(self) -> str:
+        """Assemble full document text from page outputs."""
+        texts = [p.text for p in self.pages if p.text]
+        if not texts:
+            return ""
+        if len(texts) == 1:
+            return texts[0]
+        return "\n\n---\n\n".join(texts)
+
+    @property
+    def word_count(self) -> int:
+        return len(self.markdown.split()) if self.pages else 0
+
+    @property
+    def success(self) -> bool:
+        return self.status == DocumentStatus.SUCCESS

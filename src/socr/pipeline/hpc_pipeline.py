@@ -22,10 +22,10 @@ from socr.audit.heuristics import HeuristicsChecker
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.result import (
-    DocumentResult,
     DocumentStatus,
+    EngineResult,
     FigureInfo,
-    PageResult,
+    PageOutput,
     PageStatus,
 )
 from socr.engines.deepseek_vllm import DeepSeekVLLMConfig, DeepSeekVLLMEngine
@@ -35,7 +35,7 @@ from socr.figures.extractor import FigureExtractor
 from socr.pipeline.reconciler import (
     EngineOutput,
     OutputReconciler,
-    create_page_result_from_reconciliation,
+    create_page_output_from_reconciliation,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class HPCPipeline:
         )
         self._page_images: dict[int, Image.Image] = {}
 
-    def process(self, pdf_path: Path, output_dir: Path | None = None) -> DocumentResult:
+    def process(self, pdf_path: Path, output_dir: Path | None = None) -> EngineResult:
         """Process a document through the HPC pipeline."""
         start_time = time.time()
         out_dir = output_dir or self.config.output_dir
@@ -91,33 +91,31 @@ class HPCPipeline:
                 nougat_outputs = self._run_nougat_phase(doc)
 
             # Phase 3: Reconciliation
-            page_results = self._run_reconciliation_phase(
+            page_outputs = self._run_reconciliation_phase(
                 ocr_outputs, nougat_outputs, doc.page_count
             )
-
-            # Build combined markdown from page results
-            markdown = self._assemble_markdown(page_results)
 
             # Phase 4: Figures
             figures: list[FigureInfo] = []
             if self.config.save_figures:
-                figures = self._run_figure_phase(doc, page_results, out_dir)
+                figures = self._run_figure_phase(doc, page_outputs, out_dir)
 
         finally:
             self.server_manager.stop()
             self._page_images.clear()
 
         processing_time = time.time() - start_time
-        success_pages = sum(1 for r in page_results if r.status == PageStatus.SUCCESS)
+        success_pages = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
 
-        result = DocumentResult(
+        result = EngineResult(
             document_path=pdf_path,
             engine="hpc-sequential",
             status=DocumentStatus.SUCCESS if success_pages > 0 else DocumentStatus.ERROR,
-            markdown=markdown,
+            pages=page_outputs,
             pages_processed=doc.page_count,
             processing_time=processing_time,
             figures=figures,
+            model_version=self.config.hpc.ocr_model,
         )
 
         # Save output
@@ -168,7 +166,7 @@ class HPCPipeline:
                         processing_time=result.processing_time,
                     )
                 elif not self.config.quiet:
-                    console.print(f"  [red]Page {page_num}:[/red] {result.error_message}")
+                    console.print(f"  [red]Page {page_num}:[/red] {result.error}")
         else:
             def process_page(pn: int, img: Image.Image):
                 return pn, engine.process_image(img, pn)
@@ -251,12 +249,12 @@ class HPCPipeline:
         ocr_outputs: dict[int, EngineOutput],
         nougat_outputs: dict[int, EngineOutput],
         total_pages: int,
-    ) -> list[PageResult]:
+    ) -> list[PageOutput]:
         """Phase 3: Reconcile OCR + Nougat outputs."""
         if not self.config.quiet:
             console.print(f"\n[cyan]Phase 3:[/cyan] Reconciliation")
 
-        results: list[PageResult] = []
+        results: list[PageOutput] = []
         latex_merged = 0
 
         for page_num in range(1, total_pages + 1):
@@ -267,19 +265,19 @@ class HPCPipeline:
                 outputs.append(nougat_outputs[page_num])
 
             if not outputs:
-                results.append(PageResult(
+                results.append(PageOutput(
                     page_num=page_num,
                     status=PageStatus.ERROR,
-                    error_message="No engine produced output",
+                    error="No engine produced output",
                 ))
                 continue
 
             reconciliation = self.reconciler.reconcile(outputs, page_num)
-            page_result = create_page_result_from_reconciliation(
+            page_output = create_page_output_from_reconciliation(
                 reconciliation, page_num,
                 processing_time=sum(o.processing_time for o in outputs),
             )
-            results.append(page_result)
+            results.append(page_output)
 
             if reconciliation.latex_source:
                 latex_merged += reconciliation.conflicts_resolved
@@ -295,7 +293,7 @@ class HPCPipeline:
     def _run_figure_phase(
         self,
         doc: DocumentHandle,
-        page_results: list[PageResult],
+        page_outputs: list[PageOutput],
         output_dir: Path,
     ) -> list[FigureInfo]:
         """Phase 4: Extract and describe figures."""
@@ -328,11 +326,11 @@ class HPCPipeline:
         figures: list[FigureInfo] = []
         if vision_engine.initialize():
             for fig in extracted:
-                # Get context from the page result
+                # Get context from the page output
                 context = ""
-                for pr in page_results:
-                    if pr.page_num == fig.page_num:
-                        context = (pr.text or "")[:500]
+                for po in page_outputs:
+                    if po.page_num == fig.page_num:
+                        context = (po.text or "")[:500]
                         break
 
                 if fig.image is not None:
@@ -453,15 +451,15 @@ class HPCPipeline:
         return outputs
 
     @staticmethod
-    def _assemble_markdown(page_results: list[PageResult]) -> str:
-        """Combine per-page results into a single markdown document."""
+    def _assemble_markdown(page_outputs: list[PageOutput]) -> str:
+        """Combine per-page outputs into a single markdown document."""
         parts = []
-        for pr in sorted(page_results, key=lambda r: r.page_num):
-            if pr.status == PageStatus.SUCCESS and pr.text:
-                parts.append(pr.text)
+        for po in sorted(page_outputs, key=lambda p: p.page_num):
+            if po.status == PageStatus.SUCCESS and po.text:
+                parts.append(po.text)
         return "\n\n---\n\n".join(parts)
 
-    def _save_result(self, doc: DocumentHandle, result: DocumentResult, output_dir: Path) -> Path:
+    def _save_result(self, doc: DocumentHandle, result: EngineResult, output_dir: Path) -> Path:
         """Save the OCR markdown to output_dir/{stem}/{stem}.md."""
         from socr.engines.base import sanitize_filename
 
@@ -473,7 +471,8 @@ class HPCPipeline:
         frontmatter = (
             f"---\n"
             f"source: {doc.filename}\n"
-            f"engine: hpc-sequential\n"
+            f"engine: {result.engine}\n"
+            f"model_version: {result.model_version}\n"
             f"processed: {datetime.now(timezone.utc).isoformat()}\n"
             f"---\n\n"
         )

@@ -4,11 +4,11 @@ __version__ = "1.0.5"
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.result import DocumentResult
+from socr.core.result import EngineResult
 
 __all__ = [
     "DocumentHandle",
-    "DocumentResult",
+    "EngineResult",
     "EngineType",
     "PipelineConfig",
 ]

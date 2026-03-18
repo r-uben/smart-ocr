@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
-from socr.core.result import FigureInfo, PageResult, PageStatus
+from socr.core.result import FailureMode, FigureInfo, PageOutput
 from socr.engines.base import BaseHTTPEngine
 
 
@@ -54,6 +54,10 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
     def name(self) -> str:
         return "deepseek-vllm"
 
+    @property
+    def model_version(self) -> str:
+        return self.config.model
+
     def _get_client(self) -> httpx.Client:
         if self._client is None:
             headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -88,10 +92,11 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
         except Exception:
             return False
 
-    def process_image(self, image: Image.Image, page_num: int = 1) -> PageResult:
+    def process_image(self, image: Image.Image, page_num: int = 1) -> PageOutput:
         if not self._initialized and not self.initialize():
             return self._create_error_result(
-                page_num, f"vLLM server not available at {self.config.base_url}"
+                page_num, f"vLLM server not available at {self.config.base_url}",
+                failure_mode=FailureMode.MODEL_UNAVAILABLE,
             )
 
         start_time = time.time()
@@ -124,21 +129,32 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
 
             if response.status_code != 200:
                 return self._create_error_result(
-                    page_num, f"vLLM API error ({response.status_code}): {response.text[:200]}"
+                    page_num, f"vLLM API error ({response.status_code}): {response.text[:200]}",
+                    failure_mode=FailureMode.API_ERROR,
                 )
 
             text = self._extract_text(response.json())
             if not text or len(text) < 10:
-                return self._create_error_result(page_num, "OCR produced empty or minimal output")
+                return self._create_error_result(
+                    page_num, "OCR produced empty or minimal output",
+                    failure_mode=FailureMode.EMPTY_OUTPUT,
+                )
 
             return self._create_success_result(
-                page_num=page_num, text=text, confidence=0.85, processing_time=processing_time
+                page_num=page_num, text=text, engine=self.name,
+                confidence=0.85, processing_time=processing_time,
             )
 
         except httpx.TimeoutException:
-            return self._create_error_result(page_num, f"Timeout after {self.config.timeout}s")
+            return self._create_error_result(
+                page_num, f"Timeout after {self.config.timeout}s",
+                failure_mode=FailureMode.TIMEOUT,
+            )
         except Exception as e:
-            return self._create_error_result(page_num, f"vLLM error: {type(e).__name__}: {e}")
+            return self._create_error_result(
+                page_num, f"vLLM error: {type(e).__name__}: {e}",
+                failure_mode=FailureMode.API_ERROR,
+            )
 
     def describe_figure(
         self, image: Image.Image, figure_type: str = "unknown", context: str = ""

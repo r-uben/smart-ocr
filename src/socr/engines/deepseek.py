@@ -66,13 +66,13 @@ class DeepSeekEngine(BaseEngine):
         if config.deepseek_backend != "vllm":
             error = self.check_ollama_model()
             if error:
-                import time
-                from socr.core.result import DocumentResult, DocumentStatus
+                from socr.core.result import DocumentStatus, EngineResult, FailureMode
                 logger.error(f"[{self.name}] {error}")
-                return DocumentResult(
+                return EngineResult(
                     document_path=pdf_path,
                     engine=self.name,
                     status=DocumentStatus.ERROR,
+                    failure_mode=FailureMode.MODEL_UNAVAILABLE,
                     error=error,
                     processing_time=0.0,
                 )
