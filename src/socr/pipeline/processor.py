@@ -14,10 +14,11 @@ from pathlib import Path
 from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
+from socr.audit.scorer import FailureModeScorer
 from socr.core.config import PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
-from socr.core.result import DocumentStatus, EngineResult
+from socr.core.result import DocumentStatus, EngineResult, FailureMode
 from socr.engines.registry import get_engine
 from socr.figures.extractor import FigureExtractor
 
@@ -31,6 +32,7 @@ class StandardPipeline:
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
         self.heuristics = HeuristicsChecker(min_word_count=config.audit_min_words)
+        self.scorer = FailureModeScorer(checker=self.heuristics)
 
     def process(self, pdf_path: Path, output_dir: Path | None = None) -> EngineResult:
         """Process a single PDF through the full pipeline."""
@@ -161,12 +163,22 @@ class StandardPipeline:
         check = self.heuristics.check(result.markdown)
         result.audit_passed = check.passed
 
+        # Classify failures into actionable FailureMode values for the
+        # fallback router (scorer wraps the same HeuristicsResult).
+        scoring = self.scorer.score_from_audit(check)
+        if not scoring.passed:
+            result.failure_mode = scoring.primary_failure
+
         if check.errors:
             result.audit_notes = check.errors
             result.status = DocumentStatus.AUDIT_FAILED
             if not self.config.quiet:
                 for err in check.errors:
                     console.print(f"  [red]FAIL:[/red] {err}")
+                if not scoring.passed:
+                    console.print(
+                        f"  [yellow]Failure mode:[/yellow] {scoring.primary_failure.value}"
+                    )
         elif not self.config.quiet:
             console.print("  [green]Passed[/green]")
 
