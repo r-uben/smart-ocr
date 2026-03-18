@@ -16,11 +16,13 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
+from socr.core.state import DocumentState, PageState
 
 __all__ = [
     "BornDigitalDetector",
     "DocumentAssessment",
     "DocumentHandle",
+    "DocumentState",
     "DocumentStatus",
     "EngineResult",
     "EngineType",
@@ -30,6 +32,7 @@ __all__ = [
     "MetadataManager",
     "PageAssessment",
     "PageOutput",
+    "PageState",
     "PageStatus",
     "PipelineConfig",
 ]
