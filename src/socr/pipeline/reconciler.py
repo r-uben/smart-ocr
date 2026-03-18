@@ -8,7 +8,7 @@ with optional LLM for conflict resolution.
 import re
 from dataclasses import dataclass, field
 
-from socr.core.result import PageResult, PageStatus
+from socr.core.result import PageOutput, PageStatus
 
 
 @dataclass
@@ -316,13 +316,13 @@ class OutputReconciler:
         raise NotImplementedError("LLM reconciliation not yet implemented")
 
 
-def create_page_result_from_reconciliation(
+def create_page_output_from_reconciliation(
     reconciliation: ReconciliationResult,
     page_num: int,
     processing_time: float = 0.0,
-) -> PageResult:
-    """Convert ReconciliationResult to PageResult."""
-    return PageResult(
+) -> PageOutput:
+    """Convert ReconciliationResult to PageOutput."""
+    return PageOutput(
         page_num=page_num,
         text=reconciliation.text,
         status=PageStatus.SUCCESS if reconciliation.text else PageStatus.ERROR,

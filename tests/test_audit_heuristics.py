@@ -4,7 +4,7 @@ import pytest
 pytest.importorskip("rich")
 
 from socr.audit.heuristics import HeuristicsChecker
-from socr.core.result import PageResult, PageStatus
+from socr.core.result import PageOutput, PageStatus
 
 
 def test_heuristics_flags_low_word_count_and_garbage() -> None:
@@ -25,7 +25,7 @@ def test_heuristics_passes_clean_text() -> None:
 
 
 def test_page_reprocessing_logic() -> None:
-    page = PageResult(page_num=1, text="ok", status=PageStatus.SUCCESS, confidence=0.5, audit_passed=False)
+    page = PageOutput(page_num=1, text="ok", status=PageStatus.SUCCESS, confidence=0.5, audit_passed=False)
     assert page.needs_reprocessing() is True
     page.audit_passed = True
     assert page.needs_reprocessing() is False

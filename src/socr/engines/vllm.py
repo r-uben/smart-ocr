@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
-from socr.core.result import FigureInfo, PageResult, PageStatus
+from socr.core.result import FailureMode, FigureInfo, PageOutput
 from socr.engines.base import BaseHTTPEngine
 
 
@@ -84,11 +84,12 @@ class VLLMEngine(BaseHTTPEngine):
         except Exception:
             return False
 
-    def process_image(self, image: Image.Image, page_num: int = 1) -> PageResult:
+    def process_image(self, image: Image.Image, page_num: int = 1) -> PageOutput:
         """Not supported — vLLM engine is for figure description only."""
         return self._create_error_result(
             page_num,
             "vLLM engine is for figure description only. Use deepseek/nougat/gemini for OCR.",
+            failure_mode=FailureMode.API_ERROR,
         )
 
     def describe_figure(

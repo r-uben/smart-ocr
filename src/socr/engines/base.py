@@ -1,4 +1,4 @@
-"""Base engine adapters for socr v1.0.
+"""Base engine adapters for socr.
 
 Two engine families:
   - BaseEngine: CLI-based, one subprocess per document (standard mode)
@@ -13,7 +13,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
-from socr.core.result import DocumentResult, DocumentStatus, FigureInfo, PageResult, PageStatus
+from socr.core.result import (
+    DocumentStatus,
+    EngineResult,
+    FailureMode,
+    FigureInfo,
+    PageOutput,
+    PageStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,11 @@ class BaseEngine(ABC):
         """The CLI binary name (e.g., 'gemini-ocr', 'nougat-ocr')."""
         ...
 
+    @property
+    def model_version(self) -> str:
+        """Model version string. Override in subclasses that know their model."""
+        return ""
+
     def is_available(self) -> bool:
         """Check if the CLI tool is installed and callable."""
         try:
@@ -61,10 +73,11 @@ class BaseEngine(ABC):
         pdf_path: Path,
         output_dir: Path,
         config: PipelineConfig,
-    ) -> DocumentResult:
+    ) -> EngineResult:
         """Process a PDF document via CLI subprocess.
 
         Calls the CLI once on the whole PDF, reads the output markdown.
+        Returns EngineResult with a single PageOutput containing the full text.
         """
         start_time = time.time()
 
@@ -85,40 +98,56 @@ class BaseEngine(ABC):
                 if result.returncode != 0:
                     stderr = result.stderr.strip() if result.stderr else "Unknown error"
                     logger.error(f"[{self.name}] CLI failed: {stderr}")
-                    return DocumentResult(
+                    return EngineResult(
                         document_path=pdf_path,
                         engine=self.name,
                         status=DocumentStatus.ERROR,
+                        failure_mode=FailureMode.CLI_ERROR,
                         error=f"CLI exited {result.returncode}: {stderr[:500]}",
                         processing_time=time.time() - start_time,
+                        model_version=self.model_version,
                     )
 
                 # Read output markdown
                 markdown = self._read_output(pdf_path, tmp_out)
                 if markdown is None:
-                    return DocumentResult(
+                    return EngineResult(
                         document_path=pdf_path,
                         engine=self.name,
                         status=DocumentStatus.ERROR,
+                        failure_mode=FailureMode.EMPTY_OUTPUT,
                         error="CLI produced no output markdown",
                         processing_time=time.time() - start_time,
+                        model_version=self.model_version,
                     )
 
-                return DocumentResult(
+                elapsed = time.time() - start_time
+                return EngineResult(
                     document_path=pdf_path,
                     engine=self.name,
                     status=DocumentStatus.SUCCESS,
-                    markdown=markdown,
-                    processing_time=time.time() - start_time,
+                    pages=[
+                        PageOutput(
+                            page_num=0,
+                            text=markdown,
+                            status=PageStatus.SUCCESS,
+                            engine=self.name,
+                            processing_time=elapsed,
+                        )
+                    ],
+                    processing_time=elapsed,
+                    model_version=self.model_version,
                 )
 
             except subprocess.TimeoutExpired:
-                return DocumentResult(
+                return EngineResult(
                     document_path=pdf_path,
                     engine=self.name,
                     status=DocumentStatus.ERROR,
+                    failure_mode=FailureMode.TIMEOUT,
                     error=f"Timeout after {config.timeout}s",
                     processing_time=time.time() - start_time,
+                    model_version=self.model_version,
                 )
 
     @abstractmethod
@@ -208,6 +237,11 @@ class BaseHTTPEngine(ABC):
     def name(self) -> str:
         ...
 
+    @property
+    def model_version(self) -> str:
+        """Model version string. Override in subclasses."""
+        return ""
+
     @abstractmethod
     def initialize(self) -> bool:
         """Connect to the server and verify it's ready."""
@@ -218,8 +252,8 @@ class BaseHTTPEngine(ABC):
         return self._initialized or self.initialize()
 
     @abstractmethod
-    def process_image(self, image: "Image.Image", page_num: int = 1) -> PageResult:
-        """Process a single page image and return text."""
+    def process_image(self, image: "Image.Image", page_num: int = 1) -> PageOutput:
+        """Process a single page image and return structured output."""
         ...
 
     def describe_figure(
@@ -244,21 +278,28 @@ class BaseHTTPEngine(ABC):
     def _create_success_result(
         page_num: int,
         text: str,
+        engine: str = "",
         confidence: float = 0.0,
         processing_time: float = 0.0,
-    ) -> PageResult:
-        return PageResult(
+    ) -> PageOutput:
+        return PageOutput(
             page_num=page_num,
             text=text,
             status=PageStatus.SUCCESS,
+            engine=engine,
             processing_time=processing_time,
             confidence=confidence,
         )
 
     @staticmethod
-    def _create_error_result(page_num: int, error: str) -> PageResult:
-        return PageResult(
+    def _create_error_result(
+        page_num: int,
+        error: str,
+        failure_mode: FailureMode = FailureMode.API_ERROR,
+    ) -> PageOutput:
+        return PageOutput(
             page_num=page_num,
             status=PageStatus.ERROR,
-            error_message=error,
+            failure_mode=failure_mode,
+            error=error,
         )

@@ -4,22 +4,24 @@ from socr.core.config import EngineType, HPCConfig, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
 from socr.core.result import (
-    DocumentResult,
     DocumentStatus,
+    EngineResult,
+    FailureMode,
     FigureInfo,
-    PageResult,
+    PageOutput,
     PageStatus,
 )
 
 __all__ = [
     "DocumentHandle",
-    "DocumentResult",
     "DocumentStatus",
+    "EngineResult",
     "EngineType",
+    "FailureMode",
     "FigureInfo",
     "HPCConfig",
     "MetadataManager",
-    "PageResult",
+    "PageOutput",
     "PageStatus",
     "PipelineConfig",
 ]
