@@ -1,7 +1,8 @@
 """Marker OCR engine adapter.
 
-CLI: marker-ocr <path> -o <dir> [--pages 0-5] [--device auto|cpu|cuda|mps] [--force-ocr] [-q]
-Flat @click.command — no subcommands.
+CLI: marker-ocr <path> -o <dir> [--device auto|cpu|cuda|mps] [--force-ocr]
+     [--pages 0-5] [-q]
+Flat @click.command. Local inference, layout-aware (Surya + Texify).
 """
 
 from pathlib import Path
@@ -35,4 +36,8 @@ class MarkerEngine(BaseEngine):
         ]
         if config.quiet:
             cmd.append("-q")
+        if config.verbose:
+            cmd.append("-v")
+        if config.reprocess:
+            cmd.append("--reprocess")
         return cmd

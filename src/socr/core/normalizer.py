@@ -62,6 +62,16 @@ class OutputNormalizer:
     # Markdown image references: ![alt](path)
     _RE_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 
+    # Markdown fences wrapping entire output (VLMs often wrap in ```markdown...```)
+    _RE_MD_FENCE = re.compile(
+        r"^```(?:markdown|md|text|ocr)?\s*\n(.*?)```\s*$",
+        re.DOTALL,
+    )
+
+    # Degenerate output patterns: repetition loops where the same line
+    # repeats 5+ times consecutively (partial degenerate, can be trimmed)
+    _RE_LINE_REPEAT = re.compile(r"^(.{20,})\n(?:\1\n){4,}", re.MULTILINE)
+
     # Unicode replacements: smart quotes, ligatures, etc.
     _UNICODE_MAP = {
         "\u2018": "'",   # left single quote
@@ -200,6 +210,19 @@ class OutputNormalizer:
         """Apply generic markdown normalization."""
         # CRLF -> LF
         text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Strip markdown fences wrapping the entire output.
+        # VLMs (Gemini, DeepSeek, etc.) often wrap output in ```markdown...```.
+        # Noah's socOCRbench found a bug where "entire response stripped instead
+        # of just the fence markers" — we only strip if the fence wraps everything.
+        fence_match = self._RE_MD_FENCE.match(text.strip())
+        if fence_match:
+            text = fence_match.group(1)
+
+        # Repair repetition loops: if the same line repeats 5+ times,
+        # keep only one copy. This is a partial degenerate pattern that
+        # can be salvaged rather than discarded entirely.
+        text = self._RE_LINE_REPEAT.sub(r"\1\n", text)
 
         # Unicode NFKC normalization (handles compatibility chars)
         text = unicodedata.normalize("NFKC", text)

@@ -15,11 +15,11 @@ from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
-from socr.core.result import DocumentStatus, EngineResult, FailureMode
-from socr.engines.registry import get_engine
+from socr.core.result import DocumentStatus, EngineResult
+from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import FigureExtractor
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,12 @@ class StandardPipeline:
 
     def _run_primary(self, doc: DocumentHandle, output_dir: Path) -> EngineResult:
         """Stage 1: Primary OCR via CLI engine."""
+        if self.config.primary_engine == EngineType.AUTO:
+            self.config.primary_engine = resolve_auto_engine()
+            if not self.config.quiet:
+                console.print(
+                    f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
+                )
         engine = get_engine(self.config.primary_engine)
 
         if not self.config.quiet:

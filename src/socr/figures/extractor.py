@@ -10,10 +10,39 @@ Three extraction strategies (applied per page, in order):
 """
 
 import logging
+import signal
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Timeout for per-page figure extraction (seconds).
+# Protects against malformed PDFs that hang in PyMuPDF calls.
+PAGE_EXTRACTION_TIMEOUT = 30
+
+
+@contextmanager
+def _timeout_guard(seconds: int, label: str = ""):
+    """Context manager that raises TimeoutError after `seconds`.
+
+    Uses SIGALRM on Unix. Falls through as a no-op on Windows or if
+    seconds <= 0 (caller should handle gracefully).
+    """
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise TimeoutError(f"Figure extraction timed out after {seconds}s: {label}")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 @dataclass
@@ -82,142 +111,184 @@ class FigureExtractor:
                     max_area_ratio = 0.98 if is_landscape else MAX_VECTOR_AREA_RATIO
                     min_drawings = 3 if is_landscape else MIN_DRAWINGS_FOR_VECTOR
 
-                    # --- Strategy 0: Vector figures ---
                     try:
-                        drawings = page.get_drawings()
-                        if len(drawings) >= min_drawings:
-                            regions = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
+                        with _timeout_guard(PAGE_EXTRACTION_TIMEOUT, f"page {page_num}"):
+                            counter, per_page = self._extract_page_figures(
+                                page, page_num, pdf, figures, counter, per_page,
+                                processed, page_width, page_height, page_area,
+                                is_landscape, min_area_ratio, max_area_ratio, min_drawings,
+                            )
+                    except TimeoutError:
+                        logger.warning(
+                            f"Figure extraction timed out on page {page_num} "
+                            f"of {pdf_path.name}, skipping page"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Figure extraction failed on page {page_num} "
+                            f"of {pdf_path.name}: {type(e).__name__}: {e}"
+                        )
 
-                            for region_drawings, bbox in regions:
-                                if counter > self.max_total or per_page >= self.max_per_page:
-                                    break
+        except Exception as e:
+            logger.error(f"Figure extraction failed for {pdf_path.name}: {e}")
 
-                                x0, y0, x1, y1 = bbox
-                                w, h = x1 - x0, y1 - y0
-                                area = w * h
-                                ratio = area / page_area
+        logger.info(f"Extracted {len(figures)} figures from {pdf_path.name}")
+        return figures
 
-                                if area < MIN_AREA or w < 50 or h < 50:
-                                    continue
-                                if ratio < min_area_ratio or ratio > max_area_ratio:
-                                    continue
-                                if len(region_drawings) < min_drawings:
-                                    continue
+    def _extract_page_figures(
+        self,
+        page,
+        page_num: int,
+        pdf,
+        figures: list[ExtractedFigure],
+        counter: int,
+        per_page: int,
+        processed: set[tuple[int, int, int, int]],
+        page_width: float,
+        page_height: float,
+        page_area: float,
+        is_landscape: bool,
+        min_area_ratio: float,
+        max_area_ratio: float,
+        min_drawings: int,
+    ) -> tuple[int, int]:
+        """Extract figures from a single page using all three strategies.
 
-                                # Skip header/footer
-                                if not is_landscape:
-                                    cy = (y0 + y1) / 2
-                                    in_margin = cy < page_height * HEADER_FOOTER_MARGIN or cy > page_height * (1 - HEADER_FOOTER_MARGIN)
-                                    if in_margin and len(region_drawings) < 20:
-                                        continue
+        Returns updated (counter, per_page).
+        """
+        # --- Strategy 0: Vector figures ---
+        try:
+            drawings = page.get_drawings()
+            if len(drawings) >= min_drawings:
+                regions = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
 
-                                key = (int(x0), int(y0), int(x1), int(y1))
-                                if key in processed:
-                                    continue
-                                processed.add(key)
+                for region_drawings, bbox in regions:
+                    if counter > self.max_total or per_page >= self.max_per_page:
+                        break
 
-                                img = _render_region(page, x0, y0, x1, y1, page_width, page_height)
-                                if img is None:
-                                    continue
+                    x0, y0, x1, y1 = bbox
+                    w, h = x1 - x0, y1 - y0
+                    area = w * h
+                    ratio = area / page_area
 
-                                fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
-                                if self.save_dir:
-                                    fig.saved_path = str(self._save(img, counter, page_num))
-                                figures.append(fig)
-                                counter += 1
-                                per_page += 1
+                    if area < MIN_AREA or w < 50 or h < 50:
+                        continue
+                    if ratio < min_area_ratio or ratio > max_area_ratio:
+                        continue
+                    if len(region_drawings) < min_drawings:
+                        continue
 
-                            # Presentation fallback
-                            if is_landscape and per_page == 0 and len(drawings) >= 10:
-                                img = _render_region(
-                                    page,
-                                    page_width * 0.05, page_height * 0.15,
-                                    page_width * 0.95, page_height * 0.90,
-                                    page_width, page_height,
-                                )
-                                if img:
-                                    fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
-                                    if self.save_dir:
-                                        fig.saved_path = str(self._save(img, counter, page_num))
-                                    figures.append(fig)
-                                    counter += 1
-                                    per_page += 1
-                    except Exception:
-                        pass
-
-                    # --- Strategy 1: IMAGE blocks ---
-                    try:
-                        text_dict = page.get_text("dict")
-                        for block in text_dict.get("blocks", []):
-                            if counter > self.max_total or per_page >= self.max_per_page:
-                                break
-                            if block.get("type") != 1:
-                                continue
-
-                            bbox = block.get("bbox")
-                            if not bbox:
-                                continue
-
-                            x0, y0, x1, y1 = bbox
-                            w, h = x1 - x0, y1 - y0
-                            area = w * h
-                            aspect = w / max(h, 1)
-                            if area < MIN_AREA or aspect > 8 or aspect < 0.125:
-                                continue
-
-                            key = (int(x0), int(y0), int(x1), int(y1))
-                            if key in processed:
-                                continue
-                            processed.add(key)
-
-                            img = _render_region(page, x0, y0, x1, y1, page_width, page_height, padding=0)
-                            if img is None:
-                                continue
-
-                            fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
-                            if self.save_dir:
-                                fig.saved_path = str(self._save(img, counter, page_num))
-                            figures.append(fig)
-                            counter += 1
-                            per_page += 1
-                    except Exception:
-                        pass
-
-                    # --- Strategy 2: Raw embedded images ---
-                    for img_info in page.get_images(full=True):
-                        if counter > self.max_total or per_page >= self.max_per_page:
-                            break
-
-                        xref = img_info[0]
-                        w, h = img_info[2], img_info[3]
-                        area = w * h
-                        aspect = w / max(h, 1)
-                        if area < MIN_AREA or aspect > 8 or aspect < 0.125:
+                    # Skip header/footer
+                    if not is_landscape:
+                        cy = (y0 + y1) / 2
+                        in_margin = cy < page_height * HEADER_FOOTER_MARGIN or cy > page_height * (1 - HEADER_FOOTER_MARGIN)
+                        if in_margin and len(region_drawings) < 20:
                             continue
 
-                        try:
-                            raw = pdf.extract_image(xref)
-                            if len(raw.get("image", b"")) < 5000:
-                                continue
-                        except Exception:
-                            continue
+                    key = (int(x0), int(y0), int(x1), int(y1))
+                    if key in processed:
+                        continue
+                    processed.add(key)
 
-                        img = _extract_xref_image(pdf, xref)
-                        if img is None:
-                            continue
+                    img = _render_region(page, x0, y0, x1, y1, page_width, page_height)
+                    if img is None:
+                        continue
 
+                    fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+                    if self.save_dir:
+                        fig.saved_path = str(self._save(img, counter, page_num))
+                    figures.append(fig)
+                    counter += 1
+                    per_page += 1
+
+                # Presentation fallback
+                if is_landscape and per_page == 0 and len(drawings) >= 10:
+                    img = _render_region(
+                        page,
+                        page_width * 0.05, page_height * 0.15,
+                        page_width * 0.95, page_height * 0.90,
+                        page_width, page_height,
+                    )
+                    if img:
                         fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
                         if self.save_dir:
                             fig.saved_path = str(self._save(img, counter, page_num))
                         figures.append(fig)
                         counter += 1
                         per_page += 1
-
         except Exception as e:
-            logger.error(f"Figure extraction failed: {e}")
+            logger.debug(f"Vector figure extraction failed on page {page_num}: {e}")
 
-        logger.info(f"Extracted {len(figures)} figures from {pdf_path.name}")
-        return figures
+        # --- Strategy 1: IMAGE blocks ---
+        try:
+            text_dict = page.get_text("dict")
+            for block in text_dict.get("blocks", []):
+                if counter > self.max_total or per_page >= self.max_per_page:
+                    break
+                if block.get("type") != 1:
+                    continue
+
+                bbox = block.get("bbox")
+                if not bbox:
+                    continue
+
+                x0, y0, x1, y1 = bbox
+                w, h = x1 - x0, y1 - y0
+                area = w * h
+                aspect = w / max(h, 1)
+                if area < MIN_AREA or aspect > 8 or aspect < 0.125:
+                    continue
+
+                key = (int(x0), int(y0), int(x1), int(y1))
+                if key in processed:
+                    continue
+                processed.add(key)
+
+                img = _render_region(page, x0, y0, x1, y1, page_width, page_height, padding=0)
+                if img is None:
+                    continue
+
+                fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+                if self.save_dir:
+                    fig.saved_path = str(self._save(img, counter, page_num))
+                figures.append(fig)
+                counter += 1
+                per_page += 1
+        except Exception as e:
+            logger.debug(f"IMAGE block extraction failed on page {page_num}: {e}")
+
+        # --- Strategy 2: Raw embedded images ---
+        for img_info in page.get_images(full=True):
+            if counter > self.max_total or per_page >= self.max_per_page:
+                break
+
+            xref = img_info[0]
+            w, h = img_info[2], img_info[3]
+            area = w * h
+            aspect = w / max(h, 1)
+            if area < MIN_AREA or aspect > 8 or aspect < 0.125:
+                continue
+
+            try:
+                raw = pdf.extract_image(xref)
+                if len(raw.get("image", b"")) < 5000:
+                    continue
+            except Exception as e:
+                logger.debug(f"Image xref {xref} extraction failed on page {page_num}: {e}")
+                continue
+
+            img = _extract_xref_image(pdf, xref)
+            if img is None:
+                continue
+
+            fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+            if self.save_dir:
+                fig.saved_path = str(self._save(img, counter, page_num))
+            figures.append(fig)
+            counter += 1
+            per_page += 1
+
+        return counter, per_page
 
     def _save(self, img: "Image.Image", fig_num: int, page_num: int) -> Path:
         path = self.save_dir / f"figure_{fig_num}_page{page_num}.png"

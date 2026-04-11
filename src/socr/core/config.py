@@ -8,17 +8,22 @@ from pathlib import Path
 
 
 class EngineType(str, Enum):
-    """Available OCR engines."""
+    """Available OCR engines.
 
+    Each value (except AUTO and HPC-only types) maps 1:1 to a sibling
+    CLI tool at ../ocr/{name}-ocr-cli.
+    """
+
+    AUTO = "auto"  # Auto-detect best available engine
     NOUGAT = "nougat"
     DEEPSEEK = "deepseek"
     MISTRAL = "mistral"
     GEMINI = "gemini"
     MARKER = "marker"
     GLM = "glm"  # GLM-OCR via Ollama or transformers (local)
-    GEMINI_API = "gemini-api"  # Gemini per-page via HTTP API (no CLI)
-    DEEPSEEK_VLLM = "deepseek-vllm"  # DeepSeek via vLLM HTTP API (HPC mode)
-    VLLM = "vllm"  # Generic vLLM vision model (figures only, HPC mode)
+    # HPC-only types (not backed by sibling CLIs — use vLLM HTTP API directly)
+    DEEPSEEK_VLLM = "deepseek-vllm"
+    VLLM = "vllm"
 
 
 # Default engine priority: local free -> cheap cloud -> expensive cloud
@@ -28,11 +33,21 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
     EngineType.DEEPSEEK: 2,
     EngineType.MARKER: 3,
     EngineType.GEMINI: 4,
-    EngineType.GEMINI_API: 4,  # same priority tier as CLI gemini
     EngineType.MISTRAL: 5,
     EngineType.DEEPSEEK_VLLM: 6,
     EngineType.VLLM: 7,
 }
+
+# Auto-selection order: try CLI engines until one is available.
+# Prefers cloud (best quality) > local.
+AUTO_ENGINE_ORDER: list[EngineType] = [
+    EngineType.GEMINI,      # Best quality/price, native PDF via Files API
+    EngineType.MISTRAL,     # Cloud fallback, structured output
+    EngineType.DEEPSEEK,    # Local, needs Ollama + model pulled
+    EngineType.GLM,         # Local, small model, fast
+    EngineType.NOUGAT,      # Local, academic papers only
+    EngineType.MARKER,      # Local, layout-aware
+]
 
 
 @dataclass
@@ -76,7 +91,7 @@ class PipelineConfig:
     """
 
     # --- Engine routing ---
-    primary_engine: EngineType = EngineType.DEEPSEEK
+    primary_engine: EngineType = EngineType.AUTO
     fallback_chain: list[EngineType] = field(default_factory=lambda: [EngineType.GEMINI])
     figures_engine: EngineType = EngineType.GEMINI
     enabled_engines: list[EngineType] = field(default_factory=lambda: list(EngineType))
@@ -91,6 +106,8 @@ class PipelineConfig:
     truncation_retries: int = 1  # Retry same engine on truncation before fallback
     chunk_threshold: int = 30  # Chunk PDFs longer than this many pages
     chunk_size: int = 20  # Pages per chunk
+    render_dpi: int = 200  # DPI for page rendering (used by deepseek/glm CLIs)
+    workers: int = 1  # Concurrent workers (passed to CLI --workers flag)
     save_figures: bool = False
     figures_max_total: int = 25
     figures_max_per_page: int = 3
@@ -117,12 +134,16 @@ class PipelineConfig:
     hpc: HPCConfig = field(default_factory=HPCConfig)
 
     # --- Engine-specific overrides (flat) ---
+    # These map 1:1 to CLI flags on the sibling *-ocr-cli tools.
     deepseek_backend: str = "ollama"  # "ollama" or "vllm"
+    deepseek_task: str = "convert"  # "convert", "ocr", "layout", "extract", "parse"
     deepseek_vllm_url: str = "http://localhost:8000/v1"
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
-    nougat_model: str = "0.1.0-small"
+    glm_task: str = "text"  # "text", "formula", "table", "figure"
+    nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"
+    gemini_task: str = "convert"  # "convert", "extract", "table", "describe_figure"
     mistral_model: str = "mistral-ocr-latest"
 
     def __post_init__(self) -> None:
@@ -162,13 +183,15 @@ class PipelineConfig:
         scalar_fields = [
             "native_first",
             "timeout", "max_retries", "truncation_retries",
-            "chunk_threshold", "chunk_size",
+            "chunk_threshold", "chunk_size", "render_dpi", "workers",
             "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
             "consensus_enabled", "consensus_use_llm", "consensus_ollama_model",
             "reprocess", "dry_run", "quiet", "verbose",
-            "deepseek_backend", "deepseek_vllm_url", "glm_backend", "nougat_model",
-            "marker_device", "gemini_model", "mistral_model",
+            "deepseek_backend", "deepseek_task", "deepseek_vllm_url",
+            "glm_backend", "glm_task",
+            "nougat_model", "marker_device",
+            "gemini_model", "gemini_task", "mistral_model",
         ]
         for key in scalar_fields:
             if key in data:
