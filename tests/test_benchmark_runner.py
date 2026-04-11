@@ -81,14 +81,22 @@ def _make_score(
     processing_time: float = 1.0,
 ) -> DocumentScore:
     """Build a minimal DocumentScore."""
+    nes = 1.0 - cer  # approximate NES from CER
     return DocumentScore(
         paper_name=paper,
         engine=engine,
         pages=[
-            PageScore(page_num=1, word_error_rate=wer, character_error_rate=cer, word_count_ratio=1.0),
+            PageScore(
+                page_num=1,
+                word_error_rate=wer,
+                character_error_rate=cer,
+                normalized_edit_similarity=nes,
+                word_count_ratio=1.0,
+            ),
         ],
         overall_wer=wer,
         overall_cer=cer,
+        overall_nes=nes,
         processing_time=processing_time,
     )
 

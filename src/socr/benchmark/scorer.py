@@ -1,7 +1,10 @@
-"""Benchmark scoring: WER and CER for OCR quality evaluation.
+"""Benchmark scoring: WER, CER, and NES for OCR quality evaluation.
 
-Compares OCR output against ground truth using Word Error Rate (WER)
-and Character Error Rate (CER) based on Levenshtein edit distance.
+Compares OCR output against ground truth using:
+  - WER: Word Error Rate (edit_distance / ref_words)
+  - CER: Character Error Rate (edit_distance / ref_chars)
+  - NES: Normalized Edit Similarity (1 - edit_distance / max(len_pred, len_gt))
+    More robust than WER for OCR evaluation (per socOCRbench).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ class PageScore:
     page_num: int
     word_error_rate: float  # WER
     character_error_rate: float  # CER
+    normalized_edit_similarity: float  # NES (0-1, higher is better)
     word_count_ratio: float  # predicted/actual word count
 
 
@@ -31,6 +35,7 @@ class DocumentScore:
     pages: list[PageScore] = field(default_factory=list)
     overall_wer: float = 0.0
     overall_cer: float = 0.0
+    overall_nes: float = 0.0  # Normalized Edit Similarity
     processing_time: float = 0.0
 
 
@@ -119,6 +124,26 @@ class BenchmarkScorer:
         distance = _levenshtein_chars(ground_truth, predicted)
         return distance / len(ground_truth)
 
+    def score_nes(self, predicted: str, ground_truth: str) -> float:
+        """Compute Normalized Edit Similarity.
+
+        NES = 1 - edit_distance(pred, gt) / max(len(pred), len(gt))
+
+        Range: 0-1 (1.0 = perfect match). More robust than WER for OCR
+        because it normalizes by the longer string (not just reference),
+        avoiding >1.0 scores and handling insertions fairly.
+
+        Per socOCRbench (Dasanaike 2026).
+        """
+        if not ground_truth and not predicted:
+            return 1.0
+        if not ground_truth or not predicted:
+            return 0.0
+
+        distance = _levenshtein_chars(predicted, ground_truth)
+        max_len = max(len(predicted), len(ground_truth))
+        return 1.0 - (distance / max_len)
+
     def score_page(
         self,
         predicted: str,
@@ -133,10 +158,11 @@ class BenchmarkScorer:
             page_num: Page number (1-indexed).
 
         Returns:
-            PageScore with WER, CER, and word count ratio.
+            PageScore with WER, CER, NES, and word count ratio.
         """
         wer = self.score(predicted, ground_truth)
         cer = self.score_cer(predicted, ground_truth)
+        nes = self.score_nes(predicted, ground_truth)
 
         ref_wc = len(ground_truth.split()) if ground_truth else 0
         hyp_wc = len(predicted.split()) if predicted else 0
@@ -146,6 +172,7 @@ class BenchmarkScorer:
             page_num=page_num,
             word_error_rate=wer,
             character_error_rate=cer,
+            normalized_edit_similarity=nes,
             word_count_ratio=wc_ratio,
         )
 
@@ -194,13 +221,17 @@ class BenchmarkScorer:
             all_gt_chars.extend(list(gt_text))
             all_pred_chars.extend(list(pred_text))
 
-        # Overall WER and CER across all pages
+        # Overall WER, CER, and NES across all pages
         overall_wer = 0.0
         overall_cer = 0.0
+        overall_nes = 0.0
         if all_gt_words:
             overall_wer = _levenshtein(all_gt_words, all_pred_words) / len(all_gt_words)
         if all_gt_chars:
-            overall_cer = _levenshtein(all_gt_chars, all_pred_chars) / len(all_gt_chars)
+            dist = _levenshtein(all_gt_chars, all_pred_chars)
+            overall_cer = dist / len(all_gt_chars)
+            max_len = max(len(all_gt_chars), len(all_pred_chars))
+            overall_nes = 1.0 - (dist / max_len) if max_len > 0 else 1.0
 
         return DocumentScore(
             paper_name=result.document_path.stem,
@@ -208,5 +239,6 @@ class BenchmarkScorer:
             pages=page_scores,
             overall_wer=overall_wer,
             overall_cer=overall_cer,
+            overall_nes=overall_nes,
             processing_time=result.processing_time,
         )

@@ -309,18 +309,18 @@ class UnifiedPipeline:
     def _backbone_native_first(
         self, state: DocumentState, output_dir: Path
     ) -> EngineResult:
-        """Native text for prose pages, VLM only for complex/scanned pages.
+        """3-tier routing: native → local → cloud.
 
-        For each page:
-          - Born-digital prose (no tables/figures/equations): use native text
-            directly as final output.
-          - Born-digital with complex content: send to CLI engine.
-          - Scanned (no text layer): send to CLI engine.
+        Tier 1: Born-digital prose → native text (free, instant)
+        Tier 2: Easy scanned pages → local engine (free, fast)
+        Tier 3: Hard pages (tables, multi-column, degraded) → primary engine (cloud)
 
-        Only the pages that need OCR are extracted into a temporary PDF and
-        sent to the primary CLI engine.  Prose pages are "free" -- no engine
-        calls, no latency, 100% faithful to the original text.
+        When tiered=False or no local engine is available, tiers 2+3 collapse
+        into a single pass using the primary engine (same as before).
         """
+        from socr.core.difficulty import PageDifficulty, classify_pages
+        from socr.engines.registry import resolve_local_engine
+
         # Classify pages
         prose_pages: list[int] = []
         enhancement_pages: list[int] = []
@@ -337,138 +337,83 @@ class UnifiedPipeline:
         total = len(state.pages)
         ocr_pages = enhancement_pages + scanned_pages
 
-        if not self.config.quiet:
-            console.print(
-                "\n[cyan]Phase 2:[/cyan] Text extraction (native-first)"
+        # Tier 2/3 split: classify difficulty of OCR pages
+        easy_pages: list[int] = []
+        hard_pages: list[int] = []
+
+        # Resolve local engine for tiered routing
+        local_engine_type = None
+        if self.config.tiered and ocr_pages:
+            if self.config.local_engine == EngineType.AUTO:
+                local_engine_type = resolve_local_engine()
+            elif self.config.local_engine != self.config.primary_engine:
+                local_engine_type = self.config.local_engine
+
+        if local_engine_type and ocr_pages:
+            # Classify page difficulty
+            difficulty_map = classify_pages(
+                str(state.handle.path), ocr_pages
             )
+            for page_num in ocr_pages:
+                da = difficulty_map.get(page_num)
+                if da and da.difficulty == PageDifficulty.EASY:
+                    easy_pages.append(page_num)
+                else:
+                    hard_pages.append(page_num)
+        else:
+            # No tiered routing — all OCR pages go to primary
+            hard_pages = ocr_pages
+
+        if not self.config.quiet:
+            label = "native-first" if not local_engine_type else "tiered"
+            console.print(f"\n[cyan]Phase 2:[/cyan] Text extraction ({label})")
             if prose_pages:
                 console.print(
                     f"  {len(prose_pages)}/{total} pages: "
                     "native text (born-digital prose)"
                 )
-            if enhancement_pages:
+            if easy_pages:
                 console.print(
-                    f"  {len(enhancement_pages)}/{total} pages: "
-                    "OCR (tables/figures/equations)"
+                    f"  {len(easy_pages)}/{total} pages: "
+                    f"local OCR [{local_engine_type.value}] (easy)"
                 )
-            if scanned_pages:
+            if hard_pages:
                 console.print(
-                    f"  {len(scanned_pages)}/{total} pages: "
-                    "OCR (scanned, no text layer)"
+                    f"  {len(hard_pages)}/{total} pages: "
+                    f"cloud OCR [{self.config.primary_engine.value}] (hard)"
                 )
+            if not ocr_pages:
+                console.print("  All pages born-digital")
 
         start_time = time.time()
         page_outputs: list[PageOutput] = []
 
-        # 1. Set native text as final output for prose pages.
+        # Tier 1: Native text for prose pages
         for page_num in prose_pages:
             ps = state.pages[page_num]
-            page_out = PageOutput(
+            page_outputs.append(PageOutput(
                 page_num=page_num,
                 text=ps.native_text,
                 status=PageStatus.SUCCESS,
                 engine="native",
                 audit_passed=True,
+            ))
+
+        # Tier 2: Local engine for easy pages
+        if easy_pages and local_engine_type:
+            local_outputs = self._run_engine_on_pages(
+                state, easy_pages, enhancement_pages,
+                local_engine_type, "local",
             )
-            page_outputs.append(page_out)
+            page_outputs.extend(local_outputs)
 
-        # 2. Process OCR pages via CLI engine on a temp sub-PDF
-        if ocr_pages:
-            engine = get_engine(self.config.primary_engine)
-
-            if not engine.is_available():
-                engine_name = engine.name
-                logger.warning(f"{engine_name} not available for native-first OCR")
-                if not self.config.quiet:
-                    console.print(
-                        f"  [yellow]{engine_name} not available -- "
-                        "using native text as fallback[/yellow]"
-                    )
-                for page_num in enhancement_pages:
-                    ps = state.pages[page_num]
-                    if ps.native_text:
-                        page_outputs.append(PageOutput(
-                            page_num=page_num,
-                            text=ps.native_text,
-                            status=PageStatus.SUCCESS,
-                            engine="native",
-                            audit_passed=True,
-                        ))
-                for page_num in scanned_pages:
-                    page_outputs.append(PageOutput(
-                        page_num=page_num,
-                        text="",
-                        status=PageStatus.ERROR,
-                        engine=engine.name,
-                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
-                    ))
-            else:
-                # Create a temp PDF with only the pages that need OCR
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    tmp_path = Path(tmpdir)
-                    sub_pdf_path = tmp_path / "ocr_pages.pdf"
-
-                    # Extract needed pages into a sub-PDF (0-indexed for fitz)
-                    with fitz.open(state.handle.path) as src_pdf:
-                        sub_pdf = fitz.open()
-                        for page_num in sorted(ocr_pages):
-                            sub_pdf.insert_pdf(
-                                src_pdf,
-                                from_page=page_num - 1,
-                                to_page=page_num - 1,
-                            )
-                        sub_pdf.save(sub_pdf_path)
-                        sub_pdf.close()
-
-                    if not self.config.quiet:
-                        console.print(
-                            f"  Running {engine.name} on "
-                            f"{len(ocr_pages)} pages..."
-                        )
-
-                    cli_result = engine.process_document(
-                        sub_pdf_path, tmp_path / "out", self.config,
-                    )
-
-                    if cli_result.success and cli_result.markdown:
-                        # CLI returns whole-doc text; wrap as single output
-                        # covering all OCR pages.
-                        for page_num in ocr_pages:
-                            page_outputs.append(PageOutput(
-                                page_num=page_num,
-                                text="",  # filled by assemble from whole-doc
-                                status=PageStatus.SUCCESS,
-                                engine=engine.name,
-                            ))
-                        # Store the whole-doc OCR text as page_num=0
-                        page_outputs.append(PageOutput(
-                            page_num=0,
-                            text=cli_result.markdown,
-                            status=PageStatus.SUCCESS,
-                            engine=engine.name,
-                            processing_time=cli_result.processing_time,
-                        ))
-                    else:
-                        # CLI failed — fall back to native text where possible
-                        for page_num in enhancement_pages:
-                            ps = state.pages[page_num]
-                            if ps.native_text:
-                                page_outputs.append(PageOutput(
-                                    page_num=page_num,
-                                    text=ps.native_text,
-                                    status=PageStatus.SUCCESS,
-                                    engine="native",
-                                    audit_passed=True,
-                                ))
-                        for page_num in scanned_pages:
-                            page_outputs.append(PageOutput(
-                                page_num=page_num,
-                                text="",
-                                status=PageStatus.ERROR,
-                                engine=engine.name,
-                                failure_mode=cli_result.failure_mode,
-                                error=cli_result.error or "",
-                            ))
+        # Tier 3: Primary (cloud) engine for hard pages
+        if hard_pages:
+            cloud_outputs = self._run_engine_on_pages(
+                state, hard_pages, enhancement_pages,
+                self.config.primary_engine, "cloud",
+            )
+            page_outputs.extend(cloud_outputs)
 
         elapsed = time.time() - start_time
 
@@ -480,9 +425,14 @@ class UnifiedPipeline:
             else DocumentStatus.ERROR
         )
 
-        engine_name = "native"
-        if ocr_pages:
-            engine_name = f"native+{self.config.primary_engine.value}"
+        engines_used = set()
+        for p in page_outputs:
+            if p.engine and p.engine != "native":
+                engines_used.add(p.engine)
+        if engines_used:
+            engine_name = "native+" + "+".join(sorted(engines_used))
+        else:
+            engine_name = "native"
 
         result = EngineResult(
             document_path=state.handle.path,
@@ -494,6 +444,119 @@ class UnifiedPipeline:
         )
         state.apply_result(result)
         return result
+
+    def _run_engine_on_pages(
+        self,
+        state: DocumentState,
+        page_nums: list[int],
+        enhancement_pages: list[int],
+        engine_type: EngineType,
+        label: str,
+    ) -> list[PageOutput]:
+        """Extract pages into a temp PDF and run a CLI engine on it.
+
+        Args:
+            state: Document state.
+            page_nums: 1-indexed page numbers to process.
+            enhancement_pages: Pages that have native text fallback.
+            engine_type: Which engine to use.
+            label: Label for log messages ("local" or "cloud").
+
+        Returns:
+            List of PageOutput for the processed pages.
+        """
+        outputs: list[PageOutput] = []
+        engine = get_engine(engine_type)
+
+        if not engine.is_available():
+            logger.warning(f"{engine.name} not available for {label} OCR")
+            if not self.config.quiet:
+                console.print(
+                    f"  [yellow]{engine.name} not available -- "
+                    "using native text as fallback[/yellow]"
+                )
+            for page_num in page_nums:
+                ps = state.pages[page_num]
+                if page_num in enhancement_pages and ps.native_text:
+                    outputs.append(PageOutput(
+                        page_num=page_num,
+                        text=ps.native_text,
+                        status=PageStatus.SUCCESS,
+                        engine="native",
+                        audit_passed=True,
+                    ))
+                else:
+                    outputs.append(PageOutput(
+                        page_num=page_num,
+                        text="",
+                        status=PageStatus.ERROR,
+                        engine=engine.name,
+                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                    ))
+            return outputs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            sub_pdf_path = tmp_path / f"{label}_pages.pdf"
+
+            with fitz.open(state.handle.path) as src_pdf:
+                sub_pdf = fitz.open()
+                for page_num in sorted(page_nums):
+                    sub_pdf.insert_pdf(
+                        src_pdf,
+                        from_page=page_num - 1,
+                        to_page=page_num - 1,
+                    )
+                sub_pdf.save(sub_pdf_path)
+                sub_pdf.close()
+
+            if not self.config.quiet:
+                console.print(
+                    f"  Running {engine.name} on "
+                    f"{len(page_nums)} {label} pages..."
+                )
+
+            cli_result = engine.process_document(
+                sub_pdf_path, tmp_path / "out", self.config,
+            )
+
+            if cli_result.success and cli_result.markdown:
+                for page_num in page_nums:
+                    outputs.append(PageOutput(
+                        page_num=page_num,
+                        text="",
+                        status=PageStatus.SUCCESS,
+                        engine=engine.name,
+                    ))
+                outputs.append(PageOutput(
+                    page_num=0,
+                    text=cli_result.markdown,
+                    status=PageStatus.SUCCESS,
+                    engine=engine.name,
+                    processing_time=cli_result.processing_time,
+                ))
+            else:
+                for page_num in page_nums:
+                    ps = state.pages[page_num]
+                    if page_num in enhancement_pages and ps.native_text:
+                        outputs.append(PageOutput(
+                            page_num=page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        ))
+                    else:
+                        outputs.append(PageOutput(
+                            page_num=page_num,
+                            text="",
+                            status=PageStatus.ERROR,
+                            engine=engine.name,
+                            failure_mode=cli_result.failure_mode,
+                            error=cli_result.error or "",
+                        ))
+
+        return outputs
 
     def _backbone_chunked(
         self,

@@ -52,3 +52,34 @@ def resolve_auto_engine() -> EngineType:
 
     logger.warning("No engines available; falling back to gemini (will likely fail)")
     return EngineType.GEMINI
+
+
+# Local-only engines for tiered routing (no API keys needed)
+_LOCAL_ENGINE_ORDER: list[EngineType] = [
+    EngineType.GLM,         # 0.9B, fast, ~10s/page
+    EngineType.DEEPSEEK,    # Larger, better quality, needs Ollama
+    EngineType.NOUGAT,      # Academic papers only
+    EngineType.MARKER,      # Layout-aware, CPU-friendly
+]
+
+
+def resolve_local_engine() -> EngineType | None:
+    """Probe local engines in priority order.
+
+    Returns the first available local engine, or None if no local
+    engine is available (tiered routing will be skipped).
+    """
+    for engine_type in _LOCAL_ENGINE_ORDER:
+        try:
+            cli_engine = _ENGINES.get(engine_type)
+            if cli_engine is None:
+                continue
+            instance = cli_engine()
+            if instance.is_available():
+                logger.info(f"Auto-selected local engine: {engine_type.value}")
+                return engine_type
+        except Exception:
+            continue
+
+    logger.info("No local engines available; tiered routing disabled")
+    return None
