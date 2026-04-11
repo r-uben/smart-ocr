@@ -92,12 +92,14 @@ class PipelineConfig:
 
     # --- Engine routing ---
     primary_engine: EngineType = EngineType.AUTO
+    local_engine: EngineType = EngineType.AUTO  # Cheap local engine for easy pages
     fallback_chain: list[EngineType] = field(default_factory=lambda: [EngineType.GEMINI])
     figures_engine: EngineType = EngineType.GEMINI
     enabled_engines: list[EngineType] = field(default_factory=lambda: list(EngineType))
 
-    # --- Native-first ---
-    native_first: bool = True  # Use native text for born-digital prose, VLM only for complex pages
+    # --- Native-first + tiered routing ---
+    native_first: bool = True  # Use native text for born-digital prose
+    tiered: bool = True  # Route easy pages to local engine, hard pages to primary
 
     # --- Processing ---
     output_dir: Path = field(default_factory=lambda: Path("output"))
@@ -167,6 +169,8 @@ class PipelineConfig:
         # Engine routing
         if "primary_engine" in data:
             config.primary_engine = EngineType(data["primary_engine"])
+        if "local_engine" in data:
+            config.local_engine = EngineType(data["local_engine"])
         if "fallback_chain" in data:
             config.fallback_chain = [EngineType(e) for e in data["fallback_chain"]]
         elif "fallback_engine" in data:
@@ -181,7 +185,7 @@ class PipelineConfig:
 
         # Scalar fields
         scalar_fields = [
-            "native_first",
+            "native_first", "tiered",
             "timeout", "max_retries", "truncation_retries",
             "chunk_threshold", "chunk_size", "render_dpi", "workers",
             "save_figures", "figures_max_total",

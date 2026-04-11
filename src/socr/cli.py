@@ -580,6 +580,7 @@ def _print_results_summary(results) -> None:
     table.add_column("Engine", style="cyan")
     table.add_column("Papers", justify="right")
     table.add_column("Scored", justify="right")
+    table.add_column("Avg NES", justify="right")
     table.add_column("Avg WER", justify="right")
     table.add_column("Avg CER", justify="right")
     table.add_column("Avg Time", justify="right")
@@ -587,6 +588,7 @@ def _print_results_summary(results) -> None:
     for engine_name in sorted(by_engine):
         runs = by_engine[engine_name]
         scored = [r for r in runs if r.score is not None]
+        avg_nes = sum(r.score.overall_nes for r in scored) / len(scored) if scored else float("nan")
         avg_wer = sum(r.score.overall_wer for r in scored) / len(scored) if scored else float("nan")
         avg_cer = sum(r.score.overall_cer for r in scored) / len(scored) if scored else float("nan")
         avg_time = sum(r.result.processing_time for r in runs) / len(runs) if runs else 0.0
@@ -595,6 +597,7 @@ def _print_results_summary(results) -> None:
             engine_name,
             str(len(runs)),
             str(len(scored)),
+            f"{avg_nes:.3f}" if scored else "N/A",
             f"{avg_wer:.3f}" if scored else "N/A",
             f"{avg_cer:.3f}" if scored else "N/A",
             f"{avg_time:.1f}s",

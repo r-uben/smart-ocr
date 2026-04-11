@@ -44,6 +44,7 @@ def _make_config(**overrides) -> PipelineConfig:
         max_retries=2,
         save_figures=False,
         quiet=True,
+        tiered=False,  # Disable tiered routing in tests (avoids fitz.open on fake PDFs)
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)

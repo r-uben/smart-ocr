@@ -256,6 +256,7 @@ def _dict_to_score(d: dict) -> DocumentScore:
             page_num=p["page_num"],
             word_error_rate=p["word_error_rate"],
             character_error_rate=p["character_error_rate"],
+            normalized_edit_similarity=p.get("normalized_edit_similarity", 0.0),
             word_count_ratio=p["word_count_ratio"],
         )
         for p in d.get("pages", [])
@@ -266,5 +267,6 @@ def _dict_to_score(d: dict) -> DocumentScore:
         pages=pages,
         overall_wer=d["overall_wer"],
         overall_cer=d["overall_cer"],
+        overall_nes=d.get("overall_nes", 0.0),
         processing_time=d.get("processing_time", 0.0),
     )
