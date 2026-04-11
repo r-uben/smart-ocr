@@ -1751,23 +1751,22 @@ class TestNativeFirstPipeline:
             complex_pages={2, 4},
         )
 
-        cli_result = _make_engine_result(text=_good_text(), engine="gemini")
+        # Mock engine returns per-page PageOutputs (the new per-page pipeline)
+        def mock_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn, text=f"OCR text for page {pn}",
+                    status=PageStatus.SUCCESS, engine="gemini", audit_passed=True,
+                )
+                for pn in page_nums
+            ]
+
         mock_engine = MagicMock()
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = cli_result
+        mock_engine.process_pages.side_effect = mock_process_pages
 
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
-            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
-        ):
-            # Mock fitz.open for both the source PDF and the new sub-PDF
-            mock_src_pdf = MagicMock()
-            mock_sub_pdf = MagicMock()
-            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
-            mock_src_pdf.__enter__ = lambda s: s
-            mock_src_pdf.__exit__ = MagicMock(return_value=False)
-
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
         assert result.status == DocumentStatus.SUCCESS
@@ -1777,8 +1776,13 @@ class TestNativeFirstPipeline:
         assert state.pages[1].best_output.engine == "native"
         assert state.pages[3].best_output.engine == "native"
 
-        # CLI engine called once for the sub-PDF of complex pages
-        mock_engine.process_document.assert_called_once()
+        # Complex pages (2, 4) should have OCR text
+        assert state.pages[2].best_output.engine == "gemini"
+        assert state.pages[4].best_output.engine == "gemini"
+        assert "OCR text for page 2" in state.pages[2].best_output.text
+
+        # process_pages called (not process_document)
+        mock_engine.process_pages.assert_called_once()
 
     def test_scanned_pages_sent_to_cli(self) -> None:
         """Scanned pages (not born-digital) should be sent to CLI engine."""
@@ -1787,22 +1791,21 @@ class TestNativeFirstPipeline:
             bd_pages={1, 2, 3},  # pages 4, 5 are scanned
         )
 
-        cli_result = _make_engine_result(text=_good_text(), engine="gemini")
+        def mock_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn, text=f"OCR for page {pn}",
+                    status=PageStatus.SUCCESS, engine="gemini", audit_passed=True,
+                )
+                for pn in page_nums
+            ]
+
         mock_engine = MagicMock()
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = cli_result
+        mock_engine.process_pages.side_effect = mock_process_pages
 
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
-            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
-        ):
-            mock_src_pdf = MagicMock()
-            mock_sub_pdf = MagicMock()
-            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
-            mock_src_pdf.__enter__ = lambda s: s
-            mock_src_pdf.__exit__ = MagicMock(return_value=False)
-
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
         assert result.status == DocumentStatus.SUCCESS
@@ -1811,8 +1814,10 @@ class TestNativeFirstPipeline:
         for i in [1, 2, 3]:
             assert state.pages[i].best_output.engine == "native"
 
-        # CLI engine called once for the 2 scanned pages
-        mock_engine.process_document.assert_called_once()
+        # Scanned pages have per-page OCR text
+        for i in [4, 5]:
+            assert state.pages[i].best_output.engine == "gemini"
+            assert f"OCR for page {i}" in state.pages[i].best_output.text
 
     def test_fully_scanned_doc_falls_through_to_ocr(self) -> None:
         """A fully scanned doc (0% born-digital) should use the old OCR path."""
@@ -1885,32 +1890,25 @@ class TestNativeFirstPipeline:
             complex_pages={2},
         )
 
-        # CLI engine fails
-        fail_result = EngineResult(
-            document_path=Path("/tmp/fake.pdf"),
-            engine="gemini",
-            status=DocumentStatus.ERROR,
-            failure_mode=FailureMode.EMPTY_OUTPUT,
-            error="CLI failed",
-        )
+        # process_pages returns failure for the complex page
+        def mock_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn, text="", status=PageStatus.ERROR,
+                    engine="gemini", failure_mode=FailureMode.EMPTY_OUTPUT,
+                )
+                for pn in page_nums
+            ]
+
         mock_engine = MagicMock()
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = fail_result
+        mock_engine.process_pages.side_effect = mock_process_pages
 
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
-            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
-        ):
-            mock_src_pdf = MagicMock()
-            mock_sub_pdf = MagicMock()
-            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
-            mock_src_pdf.__enter__ = lambda s: s
-            mock_src_pdf.__exit__ = MagicMock(return_value=False)
-
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
-        # Page 2 (complex, CLI failed) should fall back to native text
+        # Page 2 (complex, OCR failed) should fall back to native text
         assert state.pages[2].best_output is not None
         assert state.pages[2].best_output.engine == "native"
         assert state.pages[2].best_output.text == "Native text for page 2"
@@ -2012,23 +2010,24 @@ class TestNativeFirstPipeline:
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = assessment
 
-        cli_result = _make_engine_result(text=_good_text(), engine="gemini")
+        def mock_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn, text=_good_text(),
+                    status=PageStatus.SUCCESS, engine="gemini", audit_passed=True,
+                )
+                for pn in page_nums
+            ]
+
         mock_engine = MagicMock()
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = cli_result
+        mock_engine.process_pages.side_effect = mock_process_pages
 
         with (
             patch.object(DocumentHandle, "from_path", return_value=_make_handle(3)),
             patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
-            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
         ):
-            mock_src_pdf = MagicMock()
-            mock_sub_pdf = MagicMock()
-            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
-            mock_src_pdf.__enter__ = lambda s: s
-            mock_src_pdf.__exit__ = MagicMock(return_value=False)
-
             result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
 
         assert result.success

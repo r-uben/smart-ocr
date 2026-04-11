@@ -153,6 +153,136 @@ class BaseEngine(ABC):
                     model_version=self.model_version,
                 )
 
+    def process_pages(
+        self,
+        pdf_path: Path,
+        page_nums: list[int],
+        config: PipelineConfig,
+        dpi: int = 200,
+    ) -> list[PageOutput]:
+        """Process specific pages by rendering to images and calling the CLI.
+
+        Renders each page to a PNG image, saves to a temp directory, calls the
+        CLI on the directory, and reads back per-page markdown. Returns one
+        PageOutput per page with the actual OCR text (no page_num=0 hack).
+
+        Args:
+            pdf_path: Path to the source PDF.
+            page_nums: 1-indexed page numbers to process.
+            config: Pipeline configuration.
+            dpi: Render DPI for page images.
+
+        Returns:
+            List of PageOutput, one per page_num, in the same order.
+        """
+        import fitz
+        from PIL import Image
+
+        start_time = time.time()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir) / "images"
+            images_dir.mkdir()
+            cli_out = Path(tmpdir) / "out"
+
+            # Render pages to numbered PNG images
+            page_num_to_stem: dict[int, str] = {}
+            with fitz.open(pdf_path) as doc:
+                mat = fitz.Matrix(dpi / 72, dpi / 72)
+                for page_num in page_nums:
+                    stem = f"page_{page_num:04d}"
+                    page_num_to_stem[page_num] = stem
+                    pix = doc[page_num - 1].get_pixmap(matrix=mat)
+                    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    img.save(images_dir / f"{stem}.png")
+
+            # Call CLI on the image directory
+            cmd = self._build_command(images_dir, cli_out, config)
+            logger.info(f"[{self.name}] Processing {len(page_nums)} pages: {' '.join(cmd)}")
+
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=config.timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return [
+                    PageOutput(
+                        page_num=pn, status=PageStatus.ERROR, engine=self.name,
+                        failure_mode=FailureMode.TIMEOUT,
+                        error=f"Timeout after {config.timeout}s",
+                    )
+                    for pn in page_nums
+                ]
+
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()[:500]
+                return [
+                    PageOutput(
+                        page_num=pn, status=PageStatus.ERROR, engine=self.name,
+                        failure_mode=FailureMode.CLI_ERROR,
+                        error=f"CLI exited {result.returncode}: {stderr}",
+                    )
+                    for pn in page_nums
+                ]
+
+            # Read per-page output: CLI writes {cli_out}/{stem}/{stem}.md
+            elapsed = time.time() - start_time
+            outputs: list[PageOutput] = []
+
+            for page_num in page_nums:
+                stem = page_num_to_stem[page_num]
+                text = self._read_page_output(stem, cli_out)
+
+                if text:
+                    text = self._clean_output(text, self.name)
+                    outputs.append(PageOutput(
+                        page_num=page_num,
+                        text=text,
+                        status=PageStatus.SUCCESS,
+                        engine=self.name,
+                        processing_time=elapsed / len(page_nums),
+                        audit_passed=True,
+                    ))
+                else:
+                    outputs.append(PageOutput(
+                        page_num=page_num,
+                        status=PageStatus.ERROR,
+                        engine=self.name,
+                        failure_mode=FailureMode.EMPTY_OUTPUT,
+                        error=f"No output for page {page_num}",
+                    ))
+
+            return outputs
+
+    def _read_page_output(self, stem: str, output_dir: Path) -> str | None:
+        """Read output markdown for a single page image.
+
+        Tries the standard CLI output layouts:
+          - {output_dir}/{stem}/{stem}.md (subdirectory)
+          - {output_dir}/{stem}.md (flat)
+        """
+        # Subdirectory layout
+        md_path = output_dir / stem / f"{stem}.md"
+        if md_path.exists():
+            return md_path.read_text(encoding="utf-8")
+
+        # Flat layout
+        flat_path = output_dir / f"{stem}.md"
+        if flat_path.exists():
+            return flat_path.read_text(encoding="utf-8")
+
+        # Sanitized name variant (some CLIs sanitize differently)
+        sanitized = sanitize_filename(stem)
+        if sanitized != stem:
+            for variant in [
+                output_dir / sanitized / f"{sanitized}.md",
+                output_dir / f"{sanitized}.md",
+            ]:
+                if variant.exists():
+                    return variant.read_text(encoding="utf-8")
+
+        return None
+
     @abstractmethod
     def _build_command(
         self,

@@ -477,7 +477,11 @@ class UnifiedPipeline:
         engine_type: EngineType,
         label: str,
     ) -> list[PageOutput]:
-        """Extract pages into a temp PDF and run a CLI engine on it.
+        """Render pages to images and run a CLI engine per-page.
+
+        Each page is rendered to a PNG, the CLI processes the image directory,
+        and we get back one PageOutput per page with real text. No more
+        page_num=0 whole-doc hack.
 
         Args:
             state: Document state.
@@ -487,9 +491,8 @@ class UnifiedPipeline:
             label: Label for log messages ("local" or "cloud").
 
         Returns:
-            List of PageOutput for the processed pages.
+            List of PageOutput, one per page_num, with per-page text.
         """
-        outputs: list[PageOutput] = []
         engine = get_engine(engine_type)
 
         if not engine.is_available():
@@ -499,6 +502,7 @@ class UnifiedPipeline:
                     f"  [yellow]{engine.name} not available -- "
                     "using native text as fallback[/yellow]"
                 )
+            outputs: list[PageOutput] = []
             for page_num in page_nums:
                 ps = state.pages[page_num]
                 if page_num in enhancement_pages and ps.native_text:
@@ -519,65 +523,44 @@ class UnifiedPipeline:
                     ))
             return outputs
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            sub_pdf_path = tmp_path / f"{label}_pages.pdf"
-
-            with fitz.open(state.handle.path) as src_pdf:
-                sub_pdf = fitz.open()
-                for page_num in sorted(page_nums):
-                    sub_pdf.insert_pdf(
-                        src_pdf,
-                        from_page=page_num - 1,
-                        to_page=page_num - 1,
-                    )
-                sub_pdf.save(sub_pdf_path)
-                sub_pdf.close()
-
-            if not self.config.quiet:
-                console.print(
-                    f"  Running {engine.name} on "
-                    f"{len(page_nums)} {label} pages..."
-                )
-
-            cli_result = engine.process_document(
-                sub_pdf_path, tmp_path / "out", self.config,
+        if not self.config.quiet:
+            console.print(
+                f"  Running {engine.name} on "
+                f"{len(page_nums)} {label} pages (per-page)..."
             )
 
-            if cli_result.success and cli_result.markdown:
-                # CLI produces whole-doc text (page_num=0). Don't create
-                # empty per-page entries — state.text handles whole-doc
-                # outputs via whole_doc_attempts.
-                outputs.append(PageOutput(
-                    page_num=0,
-                    text=cli_result.markdown,
-                    status=PageStatus.SUCCESS,
-                    engine=engine.name,
-                    processing_time=cli_result.processing_time,
-                    audit_passed=True,
-                ))
-            else:
-                for page_num in page_nums:
-                    ps = state.pages[page_num]
-                    if page_num in enhancement_pages and ps.native_text:
-                        outputs.append(PageOutput(
-                            page_num=page_num,
-                            text=ps.native_text,
-                            status=PageStatus.SUCCESS,
-                            engine="native",
-                            audit_passed=True,
-                        ))
-                    else:
-                        outputs.append(PageOutput(
-                            page_num=page_num,
-                            text="",
-                            status=PageStatus.ERROR,
-                            engine=engine.name,
-                            failure_mode=cli_result.failure_mode,
-                            error=cli_result.error or "",
-                        ))
+        # Render pages to images → CLI processes images → per-page results
+        page_outputs = engine.process_pages(
+            pdf_path=state.handle.path,
+            page_nums=page_nums,
+            config=self.config,
+            dpi=self.config.render_dpi,
+        )
 
-        return outputs
+        # For enhancement pages where OCR failed, fall back to native text
+        final: list[PageOutput] = []
+        for po in page_outputs:
+            if (
+                po.status != PageStatus.SUCCESS
+                and po.page_num in enhancement_pages
+            ):
+                ps = state.pages[po.page_num]
+                if ps.native_text:
+                    final.append(PageOutput(
+                        page_num=po.page_num,
+                        text=ps.native_text,
+                        status=PageStatus.SUCCESS,
+                        engine="native",
+                        audit_passed=True,
+                    ))
+                    continue
+            final.append(po)
+
+        if not self.config.quiet:
+            ok = sum(1 for p in final if p.status == PageStatus.SUCCESS)
+            console.print(f"  {ok}/{len(page_nums)} pages succeeded")
+
+        return final
 
     def _backbone_chunked(
         self,
