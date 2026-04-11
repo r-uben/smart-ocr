@@ -10,8 +10,11 @@ from socr.core.config import EngineType, PipelineConfig
 
 console = Console()
 
-ENGINE_CHOICES = [e.value for e in EngineType if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)]
-# gemini-api is a per-page HTTP engine (not CLI), included for --primary selection
+ENGINE_CHOICES = [
+    e.value for e in EngineType
+    if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)
+]
+# "auto" probes engines in priority order; gemini-api is HTTP (not CLI)
 
 
 class PDFShortcutGroup(click.Group):
@@ -47,7 +50,7 @@ def build_config(
     fallback: str | None = None,
     no_audit: bool = False,
     no_native_first: bool = False,
-    timeout: int = 300,
+    timeout: int = 1800,
     save_figures: bool = False,
     reprocess: bool = False,
     dry_run: bool = False,
@@ -155,6 +158,14 @@ def process(
             config.consensus_use_llm = True
             config.consensus_ollama_model = consensus_llm
 
+    # Resolve AUTO engine early so we can route to the right pipeline
+    if config.primary_engine == EngineType.AUTO:
+        from socr.engines.registry import resolve_auto_engine
+
+        config.primary_engine = resolve_auto_engine()
+        if not config.quiet:
+            console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
+
     if hpc_sequential:
         from socr.pipeline.hpc_pipeline import HPCPipeline
 
@@ -184,8 +195,17 @@ def process(
 @click.argument("pdf_dir", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--limit", type=int, help="Maximum number of PDFs to process")
+@click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
+@click.option("--multi-engine", "multi_engine_str", type=str, default="", help="Comma-separated engines (e.g. gemini,mistral)")
 @common_options
-def batch(pdf_dir: Path, output_dir: Path | None, limit: int | None, **kwargs) -> None:
+def batch(
+    pdf_dir: Path,
+    output_dir: Path | None,
+    limit: int | None,
+    unified: bool = False,
+    multi_engine_str: str = "",
+    **kwargs,
+) -> None:
     """Process all PDFs in a directory.
 
     Supports incremental processing — unchanged files are skipped
@@ -194,11 +214,47 @@ def batch(pdf_dir: Path, output_dir: Path | None, limit: int | None, **kwargs) -
     Example:
         socr batch ~/Papers/ -o ./results/
         socr batch ~/Papers/ --dry-run
-        socr batch ~/Papers/ --reprocess --quiet
+        socr batch ~/Papers/ --unified
+        socr batch ~/Papers/ --multi-engine gemini,mistral
     """
-    from socr.pipeline.processor import StandardPipeline
-
     config = build_config(output_dir=output_dir, **kwargs)
+
+    # Multi-engine mode
+    if multi_engine_str:
+        try:
+            config.multi_engine = [
+                EngineType(e.strip())
+                for e in multi_engine_str.split(",")
+                if e.strip()
+            ]
+        except ValueError as exc:
+            raise click.ClickException(f"Unknown engine: {exc}")
+        unified = True
+        config.consensus_enabled = True
+
+    # Resolve AUTO engine
+    if config.primary_engine == EngineType.AUTO:
+        from socr.engines.registry import resolve_auto_engine
+
+        config.primary_engine = resolve_auto_engine()
+        if not config.quiet:
+            console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
+
+    # Select pipeline
+    use_unified = (
+        unified
+        or config.multi_engine
+        or config.primary_engine == EngineType.GEMINI_API
+    )
+
+    if use_unified:
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        pipeline = UnifiedPipeline(config)
+    else:
+        from socr.pipeline.processor import StandardPipeline
+
+        pipeline = StandardPipeline(config)
 
     # Handle --limit by pre-filtering
     if limit:
@@ -206,8 +262,6 @@ def batch(pdf_dir: Path, output_dir: Path | None, limit: int | None, **kwargs) -
         if not pdfs:
             console.print("[yellow]No PDF files found[/yellow]")
             return
-        # Process individually with limit applied
-        pipeline = StandardPipeline(config)
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             limited_dir = Path(tmpdir)
@@ -215,14 +269,13 @@ def batch(pdf_dir: Path, output_dir: Path | None, limit: int | None, **kwargs) -
                 (limited_dir / pdf.name).symlink_to(pdf)
             pipeline.process_batch(limited_dir, output_dir)
     else:
-        pipeline = StandardPipeline(config)
         pipeline.process_batch(pdf_dir, output_dir)
 
 
 @cli.command()
 def engines() -> None:
     """Show available OCR engines and their status."""
-    from socr.engines.registry import get_engine
+    from socr.engines.registry import get_engine, resolve_auto_engine
 
     console.print("\n[bold]Engines[/bold]\n")
 
@@ -249,6 +302,10 @@ def engines() -> None:
     gemini_api.close()
     status = "[green]+[/green]" if available else "[red]x[/red]"
     console.print(f"  [{status}] {'gemini-api':<12} [dim]cloud, per-page HTTP API (no truncation)[/dim]")
+
+    # Show what auto would select
+    auto_choice = resolve_auto_engine()
+    console.print(f"\n  [bold]auto[/bold] would select: [cyan]{auto_choice.value}[/cyan]")
 
 
 @cli.group()

@@ -10,6 +10,7 @@ from pathlib import Path
 class EngineType(str, Enum):
     """Available OCR engines."""
 
+    AUTO = "auto"  # Auto-detect best available engine
     NOUGAT = "nougat"
     DEEPSEEK = "deepseek"
     MISTRAL = "mistral"
@@ -33,6 +34,18 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
     EngineType.DEEPSEEK_VLLM: 6,
     EngineType.VLLM: 7,
 }
+
+# Auto-selection order: try these engines in order until one is available.
+# Prefers per-page API (no truncation) > CLI cloud > local.
+AUTO_ENGINE_ORDER: list[EngineType] = [
+    EngineType.GEMINI_API,  # Best quality/price, no truncation, needs API key
+    EngineType.GEMINI,      # CLI wrapper, may truncate long docs
+    EngineType.MISTRAL,     # Cloud fallback
+    EngineType.DEEPSEEK,    # Local, needs Ollama + model pulled
+    EngineType.GLM,         # Local, small model, fast
+    EngineType.NOUGAT,      # Local, academic papers only
+    EngineType.MARKER,      # Local, layout-aware
+]
 
 
 @dataclass
@@ -76,7 +89,7 @@ class PipelineConfig:
     """
 
     # --- Engine routing ---
-    primary_engine: EngineType = EngineType.DEEPSEEK
+    primary_engine: EngineType = EngineType.AUTO
     fallback_chain: list[EngineType] = field(default_factory=lambda: [EngineType.GEMINI])
     figures_engine: EngineType = EngineType.GEMINI
     enabled_engines: list[EngineType] = field(default_factory=lambda: list(EngineType))
@@ -91,6 +104,8 @@ class PipelineConfig:
     truncation_retries: int = 1  # Retry same engine on truncation before fallback
     chunk_threshold: int = 30  # Chunk PDFs longer than this many pages
     chunk_size: int = 20  # Pages per chunk
+    render_dpi: int = 200  # DPI for page rendering (higher = better quality, slower)
+    max_concurrent_pages: int = 4  # Max parallel API calls for per-page engines
     save_figures: bool = False
     figures_max_total: int = 25
     figures_max_per_page: int = 3
@@ -162,7 +177,7 @@ class PipelineConfig:
         scalar_fields = [
             "native_first",
             "timeout", "max_retries", "truncation_retries",
-            "chunk_threshold", "chunk_size",
+            "chunk_threshold", "chunk_size", "render_dpi", "max_concurrent_pages",
             "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
             "consensus_enabled", "consensus_use_llm", "consensus_ollama_model",

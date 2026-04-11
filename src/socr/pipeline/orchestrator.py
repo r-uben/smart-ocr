@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rich.console import Console
@@ -39,7 +40,7 @@ from socr.core.result import (
 )
 from socr.core.state import DocumentState
 from socr.engines.base import BaseEngine, sanitize_filename
-from socr.engines.registry import get_engine
+from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import FigureExtractor
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
@@ -76,6 +77,14 @@ class UnifiedPipeline:
         """
         pdf_path = Path(pdf_path)
         out_dir = output_dir or self.config.output_dir
+
+        # Resolve AUTO engine before starting
+        if self.config.primary_engine == EngineType.AUTO:
+            self.config.primary_engine = resolve_auto_engine()
+            if not self.config.quiet:
+                console.print(
+                    f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
+                )
 
         doc = DocumentHandle.from_path(pdf_path)
         state = DocumentState(handle=doc)
@@ -422,9 +431,16 @@ class UnifiedPipeline:
                             end=" ",
                         )
 
-                    image = state.handle.render_page(page_num)
+                    image = state.handle.render_page(
+                        page_num, dpi=self.config.render_dpi
+                    )
+                    # Pass content hint for task-specific prompts
+                    hint = (
+                        "complex" if page_num in enhancement_pages
+                        else ""
+                    )
                     page_result = engine.process_image(
-                        image, page_num=page_num
+                        image, page_num=page_num, prompt_hint=hint,
                     )
                     page_outputs.append(page_result)
 
@@ -602,28 +618,19 @@ class UnifiedPipeline:
             return err_result
 
         start_time = time.time()
-        page_outputs: list[PageOutput] = []
         total_pages = state.handle.page_count
+        dpi = self.config.render_dpi
+        max_workers = min(self.config.max_concurrent_pages, total_pages)
 
-        for page_num in range(1, total_pages + 1):
-            if not self.config.quiet:
-                console.print(
-                    f"  Page {page_num}/{total_pages}...", end=" "
-                )
-
-            image = state.handle.render_page(page_num)
-            page_result = engine.process_image(image, page_num=page_num)
-            page_outputs.append(page_result)
-
-            if not self.config.quiet:
-                if page_result.status == PageStatus.SUCCESS:
-                    console.print(
-                        f"[green]{page_result.word_count} words[/green]"
-                    )
-                else:
-                    console.print(
-                        f"[red]{page_result.failure_mode.value}[/red]"
-                    )
+        if max_workers <= 1:
+            # Sequential fallback
+            page_outputs = self._per_page_sequential(
+                engine, state, total_pages, dpi
+            )
+        else:
+            page_outputs = self._per_page_concurrent(
+                engine, state, total_pages, dpi, max_workers
+            )
 
         elapsed = time.time() - start_time
         engine.close()
@@ -647,6 +654,69 @@ class UnifiedPipeline:
         )
         state.apply_result(result)
         return result
+
+    def _per_page_sequential(
+        self, engine, state: DocumentState, total_pages: int, dpi: int,
+    ) -> list[PageOutput]:
+        """Process pages one at a time (original behavior)."""
+        page_outputs: list[PageOutput] = []
+        for page_num in range(1, total_pages + 1):
+            if not self.config.quiet:
+                console.print(f"  Page {page_num}/{total_pages}...", end=" ")
+
+            image = state.handle.render_page(page_num, dpi=dpi)
+            page_result = engine.process_image(image, page_num=page_num)
+            page_outputs.append(page_result)
+
+            if not self.config.quiet:
+                if page_result.status == PageStatus.SUCCESS:
+                    console.print(f"[green]{page_result.word_count} words[/green]")
+                else:
+                    console.print(f"[red]{page_result.failure_mode.value}[/red]")
+        return page_outputs
+
+    def _per_page_concurrent(
+        self, engine, state: DocumentState, total_pages: int, dpi: int,
+        max_workers: int,
+    ) -> list[PageOutput]:
+        """Process pages concurrently via ThreadPoolExecutor."""
+        if not self.config.quiet:
+            console.print(f"  [dim]Processing {total_pages} pages ({max_workers} concurrent)[/dim]")
+
+        # Pre-render all page images (CPU-bound, fast)
+        images: dict[int, object] = {}
+        for page_num in range(1, total_pages + 1):
+            images[page_num] = state.handle.render_page(page_num, dpi=dpi)
+
+        results_map: dict[int, PageOutput] = {}
+
+        def _process_page(page_num: int) -> tuple[int, PageOutput]:
+            result = engine.process_image(images[page_num], page_num=page_num)
+            return page_num, result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_process_page, pn): pn
+                for pn in range(1, total_pages + 1)
+            }
+            for future in as_completed(futures):
+                page_num, page_result = future.result()
+                results_map[page_num] = page_result
+
+                if not self.config.quiet:
+                    if page_result.status == PageStatus.SUCCESS:
+                        console.print(
+                            f"  Page {page_num}/{total_pages}: "
+                            f"[green]{page_result.word_count} words[/green]"
+                        )
+                    else:
+                        console.print(
+                            f"  Page {page_num}/{total_pages}: "
+                            f"[red]{page_result.failure_mode.value}[/red]"
+                        )
+
+        # Return in page order
+        return [results_map[pn] for pn in range(1, total_pages + 1)]
 
     # ------------------------------------------------------------------
     # Phase 2 (multi-engine): Backbone OCR with multiple engines

@@ -1765,7 +1765,7 @@ class TestNativeFirstPipeline:
             complex_pages={2, 4},
         )
 
-        def mock_process_image(image, page_num=1):
+        def mock_process_image(image, page_num=1, **kwargs):
             return PageOutput(
                 page_num=page_num,
                 text=f"VLM output for page {page_num}",
@@ -1807,7 +1807,7 @@ class TestNativeFirstPipeline:
             bd_pages={1, 2, 3},  # pages 4, 5 are scanned
         )
 
-        def mock_process_image(image, page_num=1):
+        def mock_process_image(image, page_num=1, **kwargs):
             return PageOutput(
                 page_num=page_num,
                 text=f"VLM OCR for page {page_num}",
@@ -1912,7 +1912,7 @@ class TestNativeFirstPipeline:
             complex_pages={2},
         )
 
-        def mock_process_image(image, page_num=1):
+        def mock_process_image(image, page_num=1, **kwargs):
             return PageOutput(
                 page_num=page_num,
                 text="",
@@ -2039,7 +2039,7 @@ class TestNativeFirstPipeline:
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = assessment
 
-        def mock_process_image(image, page_num=1):
+        def mock_process_image(image, page_num=1, **kwargs):
             return PageOutput(
                 page_num=page_num,
                 text=_good_text(),

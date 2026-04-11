@@ -9,12 +9,13 @@ import base64
 import io
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from PIL import Image
 
 from socr.core.result import FailureMode, FigureInfo, PageOutput
+from socr.core.retry import RetryConfig, retry_on_transient
 from socr.engines.base import BaseHTTPEngine
 
 
@@ -28,6 +29,7 @@ class GeminiAPIConfig:
     max_tokens: int = 8192
     temperature: float = 0.1
     base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    retry: RetryConfig = field(default_factory=lambda: RetryConfig(max_retries=3))
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -36,10 +38,28 @@ class GeminiAPIConfig:
             )
 
 
-_OCR_PROMPT = (
-    "Extract all text from this page. Preserve formatting, equations, "
-    "tables, and structure. Output as clean markdown."
+# Task-specific prompts (inspired by socOCRbench findings: different prompts
+# for different content types significantly affect quality).
+_OCR_PROMPT_DEFAULT = (
+    "Transcribe all the text in this image exactly as written. "
+    "Output ONLY the transcribed text, nothing else."
 )
+
+_OCR_PROMPT_TABLE = (
+    "OCR this document image into a markdown table. "
+    "Transcribe all text exactly as written. "
+    "Output ONLY the markdown table, nothing else."
+)
+
+_OCR_PROMPT_COMPLEX = (
+    "Extract all text from this page exactly as written. "
+    "Preserve equations in LaTeX, tables as markdown tables, "
+    "and structure with markdown headings. "
+    "Output ONLY the transcribed content, nothing else."
+)
+
+# Default prompt used when page content type is unknown
+_OCR_PROMPT = _OCR_PROMPT_DEFAULT
 
 
 class GeminiAPIEngine(BaseHTTPEngine):
@@ -97,14 +117,34 @@ class GeminiAPIEngine(BaseHTTPEngine):
         except Exception:
             return False
 
-    def process_image(self, image: Image.Image, page_num: int = 1) -> PageOutput:
-        """Send a single page image to Gemini API for OCR."""
+    def process_image(
+        self,
+        image: Image.Image,
+        page_num: int = 1,
+        prompt_hint: str = "",
+    ) -> PageOutput:
+        """Send a single page image to Gemini API for OCR.
+
+        Args:
+            image: PIL Image of the page.
+            page_num: 1-indexed page number.
+            prompt_hint: Content hint ("table", "complex", or "" for default).
+                Used to select a task-specific prompt.
+        """
         if not self._initialized and not self.initialize():
             return self._create_error_result(
                 page_num,
                 "Gemini API not available (missing or invalid API key)",
                 failure_mode=FailureMode.MODEL_UNAVAILABLE,
             )
+
+        # Select prompt based on content hint
+        if prompt_hint == "table":
+            prompt = _OCR_PROMPT_TABLE
+        elif prompt_hint == "complex":
+            prompt = _OCR_PROMPT_COMPLEX
+        else:
+            prompt = _OCR_PROMPT_DEFAULT
 
         start_time = time.time()
         try:
@@ -120,7 +160,7 @@ class GeminiAPIEngine(BaseHTTPEngine):
                                     "data": img_base64,
                                 }
                             },
-                            {"text": _OCR_PROMPT},
+                            {"text": prompt},
                         ]
                     }
                 ],
@@ -131,7 +171,13 @@ class GeminiAPIEngine(BaseHTTPEngine):
             }
 
             client = self._get_client()
-            response = client.post(self._build_url(), json=payload)
+
+            # Retry transient HTTP errors (429, 500, 502, 503, 504)
+            response = retry_on_transient(
+                lambda: client.post(self._build_url(), json=payload),
+                config=self.config.retry,
+                label=f"gemini-api p{page_num}",
+            )
 
             processing_time = time.time() - start_time
 
@@ -162,7 +208,7 @@ class GeminiAPIEngine(BaseHTTPEngine):
         except httpx.TimeoutException:
             return self._create_error_result(
                 page_num,
-                f"Timeout after {self.config.timeout}s",
+                f"Timeout after {self.config.timeout}s (retries exhausted)",
                 failure_mode=FailureMode.TIMEOUT,
             )
         except Exception as e:
@@ -212,7 +258,11 @@ class GeminiAPIEngine(BaseHTTPEngine):
             }
 
             client = self._get_client()
-            response = client.post(self._build_url(), json=payload)
+            response = retry_on_transient(
+                lambda: client.post(self._build_url(), json=payload),
+                config=self.config.retry,
+                label="gemini-api figure",
+            )
 
             if response.status_code != 200:
                 return FigureInfo(
