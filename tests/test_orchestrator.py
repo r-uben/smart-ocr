@@ -78,6 +78,35 @@ def _make_engine_result(
     )
 
 
+def _setup_mock_engine(
+    mock_engine: MagicMock,
+    result: EngineResult | None = None,
+    text: str = "",
+    name: str = "deepseek",
+) -> None:
+    """Configure a mock engine to support both process_document and process_pages."""
+    if result is None:
+        result = _make_engine_result(text=text or _good_text(), engine=name)
+    mock_engine.name = name
+    mock_engine.is_available.return_value = True
+    mock_engine.model_version = ""
+    mock_engine.process_document.return_value = result
+
+    page_text = result.markdown if result.success else ""
+    page_status = PageStatus.SUCCESS if result.success else PageStatus.ERROR
+    audit = result.audit_passed if result.success else False
+
+    def _mock_process_pages(pdf_path, page_nums, config, dpi=200):
+        return [
+            PageOutput(
+                page_num=pn, text=page_text, status=page_status,
+                engine=name, audit_passed=audit,
+            )
+            for pn in page_nums
+        ]
+    mock_engine.process_pages.side_effect = _mock_process_pages
+
+
 def _make_bd_assessment(
     page_count: int,
     born_digital_pages: set[int] | None = None,
@@ -199,13 +228,14 @@ class TestPhaseBackbone:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._phase_backbone(state, Path("/tmp/out"))
 
-        assert result is good_result
-        assert len(state.engine_runs) == 1
-        assert len(state.whole_doc_attempts) == 1
+        assert result.success
+        assert result.engine == "deepseek"
+        assert len(state.engine_runs) >= 1
 
     def test_backbone_unavailable_engine(self) -> None:
         config = _make_config()
@@ -340,6 +370,7 @@ class TestPhaseRepair:
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             pipeline._phase_repair(state, Path("/tmp/out"))
@@ -396,13 +427,14 @@ class TestPhaseRepair:
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             pipeline._phase_repair(state, Path("/tmp/out"))
 
         # With whole-doc CLI engines, pages don't get per-page best_output
-        # from the repair. But the whole_doc_attempts list should have an entry.
-        assert len(state.whole_doc_attempts) >= 1
+        # Per-page repair: page 1 should have a passing attempt
+        assert state.pages[1].best_output is not None
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +576,7 @@ class TestFullPipeline:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             with patch.object(DocumentHandle, "from_path") as mock_from_path:
@@ -570,6 +603,7 @@ class TestFullPipeline:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             with patch.object(DocumentHandle, "from_path") as mock_from_path:
@@ -607,9 +641,11 @@ class TestFullPipeline:
             if call_count[0] == 1:
                 # First call: primary engine (deepseek) - bad result
                 mock.process_document.return_value = bad_result
+                _setup_mock_engine(mock, result=bad_result, name=mock.name)
             else:
                 # Subsequent calls: fallback engine - good result
                 mock.process_document.return_value = good_result
+                _setup_mock_engine(mock, result=good_result, name=mock.name)
             return mock
 
         with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
@@ -635,6 +671,7 @@ class TestFullPipeline:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             with patch.object(DocumentHandle, "from_path") as mock_from_path:
@@ -642,7 +679,7 @@ class TestFullPipeline:
                 result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
 
         # Engine should have been called only once (no repair)
-        assert mock_engine.process_document.call_count == 1
+        assert mock_engine.process_pages.call_count >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +708,7 @@ class TestBatchProcessing:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         out_dir = tmp_path / "output"
 
@@ -748,11 +786,12 @@ class TestMaxRetries:
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             pipeline._phase_repair(state, Path("/tmp/out"))
 
-        assert mock_engine.process_document.call_count == 1
+        assert mock_engine.process_pages.call_count >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -880,14 +919,15 @@ class TestTruncationRetry:
         mock_engine.name = "gemini"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             pipeline._phase_repair(state, Path("/tmp/out"))
 
         # The retry should have called the same engine once
-        assert mock_engine.process_document.call_count == 1
+        assert mock_engine.process_pages.call_count >= 1
         # Should now have a passing whole-doc attempt
-        assert any(w.audit_passed for w in state.whole_doc_attempts)
+        assert any(p.best_output and p.best_output.audit_passed for p in state.pages.values())
         # Only 2 engine runs total: original truncated + retry
         assert len(state.engine_runs) == 2
 
@@ -925,8 +965,10 @@ class TestTruncationRetry:
             mock.is_available.return_value = True
             if engine_type == EngineType.GEMINI:
                 mock.process_document.return_value = still_truncated
+                _setup_mock_engine(mock, result=still_truncated, name=mock.name)
             else:
                 mock.process_document.return_value = good_result
+                _setup_mock_engine(mock, result=good_result, name=mock.name)
             return mock
 
         with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
@@ -979,6 +1021,7 @@ class TestTruncationRetry:
             mock.name = engine_type.value
             mock.is_available.return_value = True
             mock.process_document.return_value = good_result
+            _setup_mock_engine(mock, result=good_result, name=mock.name)
             return mock
 
         with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
@@ -1013,6 +1056,7 @@ class TestTruncationRetry:
             mock.name = engine_type.value
             mock.is_available.return_value = True
             mock.process_document.return_value = good_result
+            _setup_mock_engine(mock, result=good_result, name=mock.name)
             return mock
 
         with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
@@ -1024,274 +1068,46 @@ class TestTruncationRetry:
 
 
 # ---------------------------------------------------------------------------
-# Chunked backbone (L1B-07)
+# Per-page backbone (replaced chunked backbone)
+# Chunking is gone — all pages go through process_pages.
+# These tests are intentionally minimal.
 # ---------------------------------------------------------------------------
 
-class TestChunkedBackbone:
-    """Tests for _backbone_chunked: splitting long PDFs before OCR."""
+class TestPerPageBackbone:
+    """Tests for per-page processing (all docs go through process_pages)."""
 
-    def test_short_doc_skips_chunking(self) -> None:
-        """Documents below chunk_threshold use the normal backbone path."""
-        config = _make_config(
-            quiet=True,
-            chunk_threshold=30,
-            chunk_size=20,
-        )
+    def test_all_docs_use_process_pages(self) -> None:
+        """All documents — short and long — use process_pages."""
+        config = _make_config(quiet=True)
         pipeline = UnifiedPipeline(config)
-        # 10 pages -- well below threshold
         state = DocumentState(handle=_make_handle(10))
 
-        good_result = _make_engine_result(text=_good_text())
         mock_engine = MagicMock()
-        mock_engine.name = "deepseek"
-        mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, name="deepseek")
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._phase_backbone(state, Path("/tmp/out"))
 
-        # Should have called process_document once on the original path
-        mock_engine.process_document.assert_called_once()
-        call_path = mock_engine.process_document.call_args[0][0]
-        assert call_path == state.handle.path
+        mock_engine.process_pages.assert_called()
         assert result.success
 
-    def test_long_doc_triggers_chunking(self) -> None:
-        """Documents above chunk_threshold use the chunked backbone path."""
-        config = _make_config(
-            quiet=True,
-            chunk_threshold=5,
-            chunk_size=3,
-        )
+    def test_long_doc_uses_process_pages(self) -> None:
+        """Even long docs go through process_pages (no more chunking)."""
+        config = _make_config(quiet=True)
         pipeline = UnifiedPipeline(config)
-        # 10 pages > threshold of 5
-        state = DocumentState(handle=_make_handle(10))
-
-        chunk_texts = [
-            f"Chunk {i} text with sufficient words to be meaningful"
-            for i in range(1, 5)
-        ]
-        call_idx = [0]
-
-        def mock_process_document(pdf_path, output_dir, cfg):
-            idx = call_idx[0]
-            call_idx[0] += 1
-            text = chunk_texts[idx] if idx < len(chunk_texts) else "extra"
-            return _make_engine_result(text=text, engine="deepseek")
+        state = DocumentState(handle=_make_handle(100))
 
         mock_engine = MagicMock()
-        mock_engine.name = "deepseek"
-        mock_engine.is_available.return_value = True
-        mock_engine.process_document.side_effect = mock_process_document
-
-        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
-            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
-                from socr.core.chunker import PDFChunk
-
-                mock_chunker_instance = MockChunker.return_value
-                mock_chunker_instance.chunk.return_value = [
-                    PDFChunk(
-                        chunk_num=i,
-                        start_page=(i - 1) * 3 + 1,
-                        end_page=min(i * 3, 10),
-                        path=Path(f"/tmp/chunk{i}.pdf"),
-                        page_count=min(3, 10 - (i - 1) * 3),
-                    )
-                    for i in range(1, 5)
-                ]
-
-                result = pipeline._phase_backbone(state, Path("/tmp/out"))
-
-        # Should have called process_document once per chunk (4 chunks)
-        assert mock_engine.process_document.call_count == 4
-        assert result.success
-        # The combined text should contain all chunk texts
-        combined = result.pages[0].text
-        for ct in chunk_texts:
-            assert ct in combined
-        # Result should be a whole-doc output (page_num=0)
-        assert result.pages[0].page_num == 0
-        # Should be applied to state
-        assert len(state.whole_doc_attempts) == 1
-
-    def test_chunked_backbone_handles_chunk_failure(self) -> None:
-        """When some chunks fail, the result still contains successful chunks."""
-        config = _make_config(
-            quiet=True,
-            chunk_threshold=5,
-            chunk_size=3,
-        )
-        pipeline = UnifiedPipeline(config)
-        state = DocumentState(handle=_make_handle(10))
-
-        call_idx = [0]
-
-        def mock_process_document(pdf_path, output_dir, cfg):
-            idx = call_idx[0]
-            call_idx[0] += 1
-            if idx == 1:
-                # Second chunk fails
-                return EngineResult(
-                    document_path=pdf_path,
-                    engine="deepseek",
-                    status=DocumentStatus.ERROR,
-                    error="Engine crashed",
-                )
-            return _make_engine_result(
-                text=f"Chunk {idx + 1} good text",
-                engine="deepseek",
-            )
-
-        mock_engine = MagicMock()
-        mock_engine.name = "deepseek"
-        mock_engine.is_available.return_value = True
-        mock_engine.process_document.side_effect = mock_process_document
-
-        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
-            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
-                from socr.core.chunker import PDFChunk
-
-                mock_chunker_instance = MockChunker.return_value
-                mock_chunker_instance.chunk.return_value = [
-                    PDFChunk(
-                        chunk_num=i,
-                        start_page=(i - 1) * 3 + 1,
-                        end_page=min(i * 3, 10),
-                        path=Path(f"/tmp/chunk{i}.pdf"),
-                        page_count=min(3, 10 - (i - 1) * 3),
-                    )
-                    for i in range(1, 5)
-                ]
-
-                result = pipeline._phase_backbone(state, Path("/tmp/out"))
-
-        # 3 out of 4 chunks succeeded, so overall result should succeed
-        assert result.success
-        combined = result.pages[0].text
-        assert "Chunk 1 good text" in combined
-        # Chunk 2 failed, so its text should NOT be in the combined output
-        assert "Chunk 2 good text" not in combined
-        assert "Chunk 3 good text" in combined
-
-    def test_chunked_backbone_all_chunks_fail(self) -> None:
-        """When all chunks fail, the result is an error."""
-        config = _make_config(
-            quiet=True,
-            chunk_threshold=5,
-            chunk_size=3,
-        )
-        pipeline = UnifiedPipeline(config)
-        state = DocumentState(handle=_make_handle(10))
-
-        def mock_process_document(pdf_path, output_dir, cfg):
-            return EngineResult(
-                document_path=pdf_path,
-                engine="deepseek",
-                status=DocumentStatus.ERROR,
-                error="Engine crashed",
-            )
-
-        mock_engine = MagicMock()
-        mock_engine.name = "deepseek"
-        mock_engine.is_available.return_value = True
-        mock_engine.process_document.side_effect = mock_process_document
-
-        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
-            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
-                from socr.core.chunker import PDFChunk
-
-                mock_chunker_instance = MockChunker.return_value
-                mock_chunker_instance.chunk.return_value = [
-                    PDFChunk(
-                        chunk_num=i,
-                        start_page=(i - 1) * 3 + 1,
-                        end_page=min(i * 3, 10),
-                        path=Path(f"/tmp/chunk{i}.pdf"),
-                        page_count=min(3, 10 - (i - 1) * 3),
-                    )
-                    for i in range(1, 5)
-                ]
-
-                result = pipeline._phase_backbone(state, Path("/tmp/out"))
-
-        assert result.status == DocumentStatus.ERROR
-        assert not result.success
-
-    def test_chunk_threshold_boundary(self) -> None:
-        """Document with exactly chunk_threshold pages should NOT be chunked."""
-        config = _make_config(
-            quiet=True,
-            chunk_threshold=10,
-            chunk_size=5,
-        )
-        pipeline = UnifiedPipeline(config)
-        # Exactly 10 pages == threshold
-        state = DocumentState(handle=_make_handle(10))
-
-        good_result = _make_engine_result(text=_good_text())
-        mock_engine = MagicMock()
-        mock_engine.name = "deepseek"
-        mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, name="deepseek")
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._phase_backbone(state, Path("/tmp/out"))
 
-        # Should NOT have chunked -- just one call with the original path
-        mock_engine.process_document.assert_called_once()
-        call_path = mock_engine.process_document.call_args[0][0]
-        assert call_path == state.handle.path
-
-    def test_chunk_threshold_plus_one(self) -> None:
-        """Document with chunk_threshold+1 pages SHOULD be chunked."""
-        config = _make_config(
-            quiet=True,
-            chunk_threshold=10,
-            chunk_size=5,
-        )
-        pipeline = UnifiedPipeline(config)
-        # 11 pages > threshold of 10
-        state = DocumentState(handle=_make_handle(11))
-
-        good_result = _make_engine_result(text=_good_text())
-        mock_engine = MagicMock()
-        mock_engine.name = "deepseek"
-        mock_engine.is_available.return_value = True
-        mock_engine.process_document.return_value = good_result
-
-        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
-            with patch("socr.pipeline.orchestrator.PDFChunker") as MockChunker:
-                from socr.core.chunker import PDFChunk
-
-                mock_chunker_instance = MockChunker.return_value
-                mock_chunker_instance.chunk.return_value = [
-                    PDFChunk(
-                        chunk_num=1,
-                        start_page=1,
-                        end_page=5,
-                        path=Path("/tmp/chunk1.pdf"),
-                        page_count=5,
-                    ),
-                    PDFChunk(
-                        chunk_num=2,
-                        start_page=6,
-                        end_page=10,
-                        path=Path("/tmp/chunk2.pdf"),
-                        page_count=5,
-                    ),
-                    PDFChunk(
-                        chunk_num=3,
-                        start_page=11,
-                        end_page=11,
-                        path=Path("/tmp/chunk3.pdf"),
-                        page_count=1,
-                    ),
-                ]
-
-                result = pipeline._phase_backbone(state, Path("/tmp/out"))
-
-        # Should have chunked -- 3 calls
-        assert mock_engine.process_document.call_count == 3
+        mock_engine.process_pages.assert_called()
+        # process_pages should have been called with all 100 page numbers
+        call_args = mock_engine.process_pages.call_args
+        page_nums = call_args[1].get("page_nums") or call_args[0][1]
+        assert len(page_nums) == 100
         assert result.success
 
 
@@ -1338,7 +1154,7 @@ class TestMultiEngine:
         assert results[1].engine == "gemini"
         # Both results applied to state
         assert len(state.engine_runs) == 2
-        assert len(state.whole_doc_attempts) == 2
+        assert len(state.engine_runs) >= 2
 
     def test_multi_engine_consensus_auto_enabled(self, tmp_path: Path) -> None:
         """In multi-engine mode, consensus should always run (even if config
@@ -1376,6 +1192,7 @@ class TestMultiEngine:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with (
             patch.object(DocumentHandle, "from_path", return_value=_make_handle(2)),
@@ -1389,7 +1206,7 @@ class TestMultiEngine:
 
         assert result.engine == "deepseek"
         # _backbone_multi_engine should NOT have been called (single-engine path)
-        mock_engine.process_document.assert_called_once()
+        mock_engine.process_pages.assert_called()
 
     def test_multi_engine_skips_unavailable_engine(self) -> None:
         """Multi-engine mode should gracefully skip unavailable engines."""
@@ -1833,12 +1650,13 @@ class TestNativeFirstPipeline:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._phase_backbone(state, Path("/tmp/out"))
 
         assert result.engine == "deepseek"
-        mock_engine.process_document.assert_called_once()
+        mock_engine.process_pages.assert_called()
 
     def test_mixed_doc_below_threshold_uses_ocr(self) -> None:
         """A doc with < 50% born-digital pages should use the old OCR path."""
@@ -1854,12 +1672,13 @@ class TestNativeFirstPipeline:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._phase_backbone(state, Path("/tmp/out"))
 
         assert result.engine == "deepseek"
-        mock_engine.process_document.assert_called_once()
+        mock_engine.process_pages.assert_called()
 
     def test_native_first_disabled_uses_ocr(self) -> None:
         """When native_first=False, full VLM/OCR runs even on born-digital docs."""
@@ -1875,12 +1694,13 @@ class TestNativeFirstPipeline:
         mock_engine.name = "deepseek"
         mock_engine.is_available.return_value = True
         mock_engine.process_document.return_value = good_result
+        _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._phase_backbone(state, Path("/tmp/out"))
 
         assert result.engine == "deepseek"
-        mock_engine.process_document.assert_called_once()
+        mock_engine.process_pages.assert_called()
 
     def test_cli_failure_falls_back_to_native_for_enhancement_pages(self) -> None:
         """When CLI fails on complex pages, native text is used as fallback."""

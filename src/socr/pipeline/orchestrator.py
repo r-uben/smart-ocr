@@ -293,18 +293,42 @@ class UnifiedPipeline:
             state.apply_result(err_result)
             return err_result
 
-        # Chunk long documents to avoid context-window / timeout issues
-        if state.handle.page_count > self.config.chunk_threshold:
-            if not self.config.quiet:
-                console.print(
-                    f"  [dim]{state.handle.page_count} pages > "
-                    f"chunk threshold {self.config.chunk_threshold}, "
-                    f"splitting into chunks of {self.config.chunk_size}[/dim]"
-                )
-            return self._backbone_chunked(state, output_dir, engine)
+        # Per-page processing: render all pages to images → CLI
+        all_pages = list(range(1, state.handle.page_count + 1))
+        if not self.config.quiet:
+            console.print(
+                f"  Processing {len(all_pages)} pages (per-page)..."
+            )
 
-        result = engine.process_document(state.handle.path, output_dir, self.config)
-        result.pages_processed = state.handle.page_count
+        start_time = time.time()
+        page_outputs = engine.process_pages(
+            pdf_path=state.handle.path,
+            page_nums=all_pages,
+            config=self.config,
+            dpi=self.config.render_dpi,
+        )
+        elapsed = time.time() - start_time
+
+        success_count = sum(
+            1 for p in page_outputs if p.status == PageStatus.SUCCESS
+        )
+        overall_status = (
+            DocumentStatus.SUCCESS if success_count > 0
+            else DocumentStatus.ERROR
+        )
+
+        if not self.config.quiet:
+            console.print(f"  {success_count}/{len(all_pages)} pages succeeded")
+
+        result = EngineResult(
+            document_path=state.handle.path,
+            engine=engine.name,
+            status=overall_status,
+            pages=page_outputs,
+            pages_processed=state.handle.page_count,
+            processing_time=elapsed,
+            model_version=engine.model_version,
+        )
         state.apply_result(result)
         return result
 
@@ -562,85 +586,6 @@ class UnifiedPipeline:
 
         return final
 
-    def _backbone_chunked(
-        self,
-        state: DocumentState,
-        output_dir: Path,
-        engine: BaseEngine,
-    ) -> EngineResult:
-        """Run the engine on each chunk and concatenate the results.
-
-        Splits the PDF via :class:`PDFChunker`, runs the engine on each
-        chunk, and combines the per-chunk texts into a single
-        ``PageOutput(page_num=0)`` whole-doc result.
-        """
-        chunker = PDFChunker(max_pages_per_chunk=self.config.chunk_size)
-        start_time = time.time()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            chunks = chunker.chunk(state.handle.path, tmp_path / "chunks")
-
-            if not self.config.quiet:
-                console.print(f"  Split into {len(chunks)} chunks")
-
-            chunk_texts: list[str] = []
-            total_cost = 0.0
-
-            for chunk in chunks:
-                if not self.config.quiet:
-                    console.print(
-                        f"  Chunk {chunk.chunk_num}/{len(chunks)} "
-                        f"(pages {chunk.start_page}-{chunk.end_page})"
-                    )
-
-                chunk_result = engine.process_document(
-                    chunk.path, tmp_path / "out", self.config,
-                )
-
-                if chunk_result.success and chunk_result.pages:
-                    # CLI engines produce page_num=0 whole-doc output
-                    text = chunk_result.markdown
-                    if text:
-                        chunk_texts.append(text)
-                else:
-                    logger.warning(
-                        f"Chunk {chunk.chunk_num} failed: "
-                        f"{chunk_result.error or chunk_result.status.value}"
-                    )
-
-                total_cost += chunk_result.cost
-
-        elapsed = time.time() - start_time
-        combined_text = "\n\n".join(chunk_texts)
-
-        if combined_text.strip():
-            status = DocumentStatus.SUCCESS
-            page_status = PageStatus.SUCCESS
-        else:
-            status = DocumentStatus.ERROR
-            page_status = PageStatus.ERROR
-
-        result = EngineResult(
-            document_path=state.handle.path,
-            engine=engine.name,
-            status=status,
-            pages=[
-                PageOutput(
-                    page_num=0,
-                    text=combined_text,
-                    status=page_status,
-                    engine=engine.name,
-                    processing_time=elapsed,
-                )
-            ],
-            pages_processed=state.handle.page_count,
-            processing_time=elapsed,
-            cost=total_cost,
-        )
-        state.apply_result(result)
-        return result
-
     # ------------------------------------------------------------------
     # Phase 2 (multi-engine): Backbone OCR with multiple engines
     # ------------------------------------------------------------------
@@ -686,21 +631,29 @@ class UnifiedPipeline:
                     console.print(" [yellow]not available[/yellow]")
                 continue
 
-            # Chunk long documents as in single-engine mode
-            if state.handle.page_count > self.config.chunk_threshold:
-                if not self.config.quiet:
-                    n_chunks = -(-state.handle.page_count // self.config.chunk_size)
-                    console.print(
-                        f" (chunked, {n_chunks} chunks)",
-                        end="",
-                    )
-                result = self._backbone_chunked(state, output_dir, engine)
-            else:
-                result = engine.process_document(
-                    state.handle.path, output_dir, self.config
-                )
-                result.pages_processed = state.handle.page_count
-                state.apply_result(result)
+            # Per-page processing for all engines
+            all_pages = list(range(1, state.handle.page_count + 1))
+            page_outputs = engine.process_pages(
+                pdf_path=state.handle.path,
+                page_nums=all_pages,
+                config=self.config,
+                dpi=self.config.render_dpi,
+            )
+            success_count = sum(
+                1 for p in page_outputs if p.status == PageStatus.SUCCESS
+            )
+            result = EngineResult(
+                document_path=state.handle.path,
+                engine=engine.name,
+                status=(
+                    DocumentStatus.SUCCESS if success_count > 0
+                    else DocumentStatus.ERROR
+                ),
+                pages=page_outputs,
+                pages_processed=state.handle.page_count,
+                model_version=engine.model_version,
+            )
+            state.apply_result(result)
 
             word_count = sum(p.word_count for p in result.pages)
             if not self.config.quiet:
@@ -959,22 +912,31 @@ class UnifiedPipeline:
                         engine = get_engine(truncated_engine_type)
                         if not engine.is_available():
                             break
-                        retry_result = engine.process_document(
-                            state.handle.path, output_dir, self.config
+                        all_pages = list(range(1, state.handle.page_count + 1))
+                        page_outputs = engine.process_pages(
+                            state.handle.path, all_pages, self.config,
+                            dpi=self.config.render_dpi,
                         )
-                        retry_result.pages_processed = (
-                            state.handle.page_count
+                        retry_result = EngineResult(
+                            document_path=state.handle.path,
+                            engine=engine.name,
+                            status=DocumentStatus.SUCCESS if any(
+                                p.status == PageStatus.SUCCESS for p in page_outputs
+                            ) else DocumentStatus.ERROR,
+                            pages=page_outputs,
+                            pages_processed=state.handle.page_count,
                         )
                         state.apply_result(retry_result)
                         if retry_result.success:
                             self._score_repair_result(
                                 state, retry_result, []
                             )
-                        # Check if the retry passed
-                        if any(
-                            w.audit_passed
-                            for w in state.whole_doc_attempts
-                        ):
+                        # Check if per-page results pass
+                        ok = sum(
+                            1 for p in page_outputs
+                            if p.status == PageStatus.SUCCESS and p.audit_passed
+                        )
+                        if ok == state.handle.page_count:
                             needs_whole_doc_retry = False
                             has_passing_whole_doc = True
                             break
@@ -1009,20 +971,26 @@ class UnifiedPipeline:
                         )
                     engine = get_engine(next_engine)
                     if engine.is_available():
-                        repair_result = engine.process_document(
-                            state.handle.path, output_dir, self.config
+                        all_pages = list(range(1, state.handle.page_count + 1))
+                        page_outputs = engine.process_pages(
+                            state.handle.path, all_pages, self.config,
+                            dpi=self.config.render_dpi,
                         )
-                        repair_result.pages_processed = state.handle.page_count
+                        repair_result = EngineResult(
+                            document_path=state.handle.path,
+                            engine=engine.name,
+                            status=DocumentStatus.SUCCESS if any(
+                                p.status == PageStatus.SUCCESS for p in page_outputs
+                            ) else DocumentStatus.ERROR,
+                            pages=page_outputs,
+                            pages_processed=state.handle.page_count,
+                        )
                         state.apply_result(repair_result)
                         if repair_result.success:
                             self._score_repair_result(
                                 state, repair_result, []
                             )
-                            # Check if the new attempt passed
-                            if any(
-                                w.audit_passed
-                                for w in state.whole_doc_attempts
-                            ):
+                            if not state.pages_needing_repair:
                                 needs_whole_doc_retry = False
                                 break
                     continue
@@ -1070,15 +1038,23 @@ class UnifiedPipeline:
                         )
                     continue
 
-                # CLI engines process the whole document; the orchestrator
-                # picks per-page improvements from the result.
-                repair_result = engine.process_document(
-                    state.handle.path, output_dir, self.config
+                # Only process the failed pages, not the whole document
+                failed_pages = [r.page_num for r in repairs]
+                page_outputs = engine.process_pages(
+                    state.handle.path, failed_pages, self.config,
+                    dpi=self.config.render_dpi,
                 )
-                repair_result.pages_processed = state.handle.page_count
+                repair_result = EngineResult(
+                    document_path=state.handle.path,
+                    engine=engine.name,
+                    status=DocumentStatus.SUCCESS if any(
+                        p.status == PageStatus.SUCCESS for p in page_outputs
+                    ) else DocumentStatus.ERROR,
+                    pages=page_outputs,
+                    pages_processed=len(failed_pages),
+                )
                 state.apply_result(repair_result)
 
-                # Score the repair result
                 if repair_result.success:
                     self._score_repair_result(state, repair_result, repairs)
 

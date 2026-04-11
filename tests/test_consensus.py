@@ -660,34 +660,6 @@ class TestReconcileDocument:
         results = engine.reconcile_document(state)
         assert results == []
 
-    def test_whole_doc_consensus_with_native_text(self) -> None:
-        """Whole-doc consensus should assemble native text from all pages."""
-        state = DocumentState(handle=_make_handle(2))
-        # Set native text on both pages
-        state.pages[1].native_text = "page one native text"
-        state.pages[2].native_text = "page two native text"
-
-        native_combined = "page one native text\n\npage two native text"
-
-        # Two whole-doc attempts: one faithful, one hallucinated
-        faithful = _make_page_output(
-            0, text=native_combined, engine="engine-good"
-        )
-        hallucinated = _make_page_output(
-            0,
-            text=native_combined + " " + "garbage " * 30,
-            engine="engine-bad",
-        )
-        state.whole_doc_attempts = [faithful, hallucinated]
-
-        engine = ConsensusEngine()
-        results = engine.reconcile_document(state)
-
-        # Should have a whole-doc consensus result
-        whole_doc_results = [r for r in results if r.page_num == 0]
-        assert len(whole_doc_results) == 1
-        assert whole_doc_results[0].selected_engine == "engine-good"
-
     def test_per_page_passes_native_text_as_reference(self) -> None:
         """Per-page consensus should pass native_text to select_best."""
         state = DocumentState(handle=_make_handle(1))

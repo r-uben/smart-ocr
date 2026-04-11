@@ -483,53 +483,14 @@ class ConsensusEngine:
     def reconcile_document(
         self, state: DocumentState
     ) -> list[ConsensusResult]:
-        """Run consensus across all pages and whole-doc attempts.
+        """Run per-page consensus across all engine attempts.
 
-        Handles two cases:
-          1. Per-page attempts (HTTP engines) -- compare per page.
-          2. Whole-doc attempts (CLI engines, page_num=0) -- compare at
-             document level and promote the winner.
-
-        When native text is available (born-digital detection), it is
-        passed as reference for grounded scoring.
+        For each page with 2+ attempts from different engines, compares
+        the outputs and picks the best one. When native text is available
+        (born-digital detection), it is used as reference for grounded scoring.
         """
         results: list[ConsensusResult] = []
 
-        # --- Whole-doc consensus ---
-        # CLI engines produce page_num=0 whole-doc outputs.  When we have
-        # 2+ whole-doc attempts, pick the best one and promote it.
-        if len(state.whole_doc_attempts) >= 2:
-            # Assemble full native text from all pages for grounding
-            native_full = "\n\n".join(
-                p.native_text
-                for p in state.pages.values()
-                if p.native_text
-            )
-            cr = self._select_best_impl(
-                state.whole_doc_attempts, reference_text=native_full
-            )
-            cr.page_num = 0
-            results.append(cr)
-
-            if not self.quiet:
-                logger.info(
-                    f"Whole-doc consensus: selected {cr.selected_engine} "
-                    f"(agreement={cr.agreement_score:.2f})"
-                )
-
-            # Replace the whole-doc attempts list so state.text picks
-            # the consensus winner (move it to the end).
-            winner = PageOutput(
-                page_num=0,
-                text=cr.merged_text,
-                status=PageStatus.SUCCESS if cr.merged_text.strip() else PageStatus.ERROR,
-                engine=f"consensus({cr.selected_engine})",
-                audit_passed=True,
-                confidence=cr.agreement_score,
-            )
-            state.whole_doc_attempts.append(winner)
-
-        # --- Per-page consensus ---
         for page_num in sorted(state.pages):
             page_state = state.pages[page_num]
 
