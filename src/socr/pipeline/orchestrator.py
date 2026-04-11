@@ -521,19 +521,16 @@ class UnifiedPipeline:
             )
 
             if cli_result.success and cli_result.markdown:
-                for page_num in page_nums:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        text="",
-                        status=PageStatus.SUCCESS,
-                        engine=engine.name,
-                    ))
+                # CLI produces whole-doc text (page_num=0). Don't create
+                # empty per-page entries — state.text handles whole-doc
+                # outputs via whole_doc_attempts.
                 outputs.append(PageOutput(
                     page_num=0,
                     text=cli_result.markdown,
                     status=PageStatus.SUCCESS,
                     engine=engine.name,
                     processing_time=cli_result.processing_time,
+                    audit_passed=True,
                 ))
             else:
                 for page_num in page_nums:
