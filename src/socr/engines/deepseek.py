@@ -1,16 +1,15 @@
 """DeepSeek OCR engine adapter.
 
-CLI: deepseek-ocr process <path> -o <dir> [--backend ollama|vllm] [--vllm-url] [--task ocr|format]
+CLI: deepseek-ocr process <path> -o <dir> [--task convert|ocr|layout|extract|parse]
+     [--backend ollama|vllm] [--dpi N] [-w N] [--max-dim N] [-q]
 Click group — requires explicit 'process' subcommand.
 
-Note on task modes:
-  - "ocr": Raw transcription. DeepSeek-OCR hallucinates formatting instructions
-    (font sizes, page margins, submission guidelines) with this mode.
-  - "format": Markdown-structured output. Better for academic papers but
-    may add unwanted structure to simple documents.
-
-The default is "format" since the normalizer strips hallucinated instructions
-anyway, and structured output is more useful downstream.
+Task modes:
+  - "convert": Structured markdown (uses <|grounding|> prefix). Best default.
+  - "ocr": Raw transcription ("Free OCR."). May hallucinate formatting instructions.
+  - "layout": Layout detection.
+  - "extract": Plain text extraction.
+  - "parse": Figure/chart parsing.
 """
 
 import logging
@@ -66,11 +65,9 @@ class DeepSeekEngine(BaseEngine):
         return "deepseek-ocr"
 
     def is_available(self) -> bool:
-        """Check CLI is installed AND Ollama model is available (for ollama backend)."""
+        """Check CLI is installed AND Ollama model is available."""
         if not super().is_available():
             return False
-        # Quick pre-check: if using ollama backend, verify the model is pulled
-        # to avoid slow failures at process time.
         error = _check_ollama_model(OLLAMA_MODEL)
         if error:
             logger.debug(f"[{self.name}] {error}")
@@ -105,10 +102,20 @@ class DeepSeekEngine(BaseEngine):
             "process",
             str(pdf_path),
             "-o", str(output_dir),
-            # Use "format" for structured markdown output.
-            # "ocr" mode triggers formatting hallucinations.
-            "--task", "format",
+            "--task", config.deepseek_task,
+            "--backend", config.deepseek_backend,
+            "--dpi", str(config.render_dpi),
         ]
+        if config.workers > 1:
+            cmd.extend(["-w", str(config.workers)])
         if config.deepseek_backend == "vllm":
             cmd.extend(["--vllm-url", config.deepseek_vllm_url])
+        if config.save_figures:
+            cmd.append("--analyze-figures")
+        if config.quiet:
+            cmd.append("-q")
+        if config.verbose:
+            cmd.append("--verbose")
+        if config.reprocess:
+            cmd.append("--reprocess")
         return cmd

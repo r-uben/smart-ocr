@@ -1492,41 +1492,26 @@ class TestMultiEngine:
 
         assert config.multi_engine == [EngineType.GEMINI, EngineType.MISTRAL]
 
-    def test_multi_engine_per_page_engine(self) -> None:
-        """Multi-engine mode should handle GEMINI_API (per-page engine)."""
+    def test_multi_engine_two_cli_engines(self) -> None:
+        """Multi-engine mode should run two CLI engines."""
         config = _make_config(
-            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI_API],
+            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI],
         )
         pipeline = UnifiedPipeline(config)
         state = DocumentState(handle=_make_handle(2))
 
         result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
-        result_api = EngineResult(
-            document_path=Path("/tmp/fake.pdf"),
-            engine="gemini-api",
-            status=DocumentStatus.SUCCESS,
-            pages=[
-                PageOutput(page_num=1, text="Page 1 text", status=PageStatus.SUCCESS, engine="gemini-api"),
-                PageOutput(page_num=2, text="Page 2 text", status=PageStatus.SUCCESS, engine="gemini-api"),
-            ],
-            processing_time=1.0,
-        )
+        result_gem = _make_engine_result(text=_good_text(), engine="gemini")
 
-        mock_ds = MagicMock()
-        mock_ds.name = "deepseek"
-        mock_ds.is_available.return_value = True
-        mock_ds.process_document.return_value = result_ds
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.side_effect = [result_ds, result_gem]
 
-        with (
-            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_ds),
-            patch.object(pipeline, "_backbone_per_page", return_value=result_api),
-        ):
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             results = pipeline._backbone_multi_engine(state, Path("/tmp/out"))
 
         assert len(results) == 2
-        # First is CLI engine (deepseek), second is per-page (gemini-api)
-        assert results[0].engine == "deepseek"
-        assert results[1].engine == "gemini-api"
 
 
 # ---------------------------------------------------------------------------
@@ -1757,75 +1742,67 @@ class TestNativeFirstPipeline:
             assert ps.best_output.text == f"Native text for page {i}"
             assert ps.best_output.audit_passed is True
 
-    def test_complex_pages_sent_to_vlm(self) -> None:
-        """Pages with tables/figures/equations should be sent to Gemini API."""
+    def test_complex_pages_sent_to_cli(self) -> None:
+        """Pages with tables/figures/equations should be sent to CLI engine."""
         pipeline, state = self._setup_bd_state(
             page_count=4,
             bd_pages={1, 2, 3, 4},
             complex_pages={2, 4},
         )
 
-        def mock_process_image(image, page_num=1, **kwargs):
-            return PageOutput(
-                page_num=page_num,
-                text=f"VLM output for page {page_num}",
-                status=PageStatus.SUCCESS,
-                engine="gemini-api",
-                audit_passed=True,
-            )
+        cli_result = _make_engine_result(text=_good_text(), engine="gemini")
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = cli_result
 
-        mock_engine_instance = MagicMock()
-        mock_engine_instance.is_available.return_value = True
-        mock_engine_instance.process_image.side_effect = mock_process_image
-
-        with patch(
-            "socr.engines.gemini_api.GeminiAPIEngine",
-            return_value=mock_engine_instance,
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
+            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
         ):
-            with patch.object(state.handle, "render_page", return_value=MagicMock()):
-                result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+            # Mock fitz.open for both the source PDF and the new sub-PDF
+            mock_src_pdf = MagicMock()
+            mock_sub_pdf = MagicMock()
+            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
+            mock_src_pdf.__enter__ = lambda s: s
+            mock_src_pdf.__exit__ = MagicMock(return_value=False)
+
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
         assert result.status == DocumentStatus.SUCCESS
-        assert result.engine == "native+gemini-api"
+        assert "native" in result.engine
 
         # Prose pages (1, 3) should use native text
         assert state.pages[1].best_output.engine == "native"
         assert state.pages[3].best_output.engine == "native"
 
-        # Complex pages (2, 4) should use VLM output
-        assert state.pages[2].best_output.engine == "gemini-api"
-        assert state.pages[4].best_output.engine == "gemini-api"
-        assert state.pages[2].best_output.text == "VLM output for page 2"
+        # CLI engine called once for the sub-PDF of complex pages
+        mock_engine.process_document.assert_called_once()
 
-        # Gemini engine should have been called exactly for the 2 complex pages
-        assert mock_engine_instance.process_image.call_count == 2
-
-    def test_scanned_pages_sent_to_vlm(self) -> None:
-        """Scanned pages (not born-digital) should be sent to VLM."""
+    def test_scanned_pages_sent_to_cli(self) -> None:
+        """Scanned pages (not born-digital) should be sent to CLI engine."""
         pipeline, state = self._setup_bd_state(
             page_count=5,
             bd_pages={1, 2, 3},  # pages 4, 5 are scanned
         )
 
-        def mock_process_image(image, page_num=1, **kwargs):
-            return PageOutput(
-                page_num=page_num,
-                text=f"VLM OCR for page {page_num}",
-                status=PageStatus.SUCCESS,
-                engine="gemini-api",
-                audit_passed=True,
-            )
+        cli_result = _make_engine_result(text=_good_text(), engine="gemini")
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = cli_result
 
-        mock_engine_instance = MagicMock()
-        mock_engine_instance.is_available.return_value = True
-        mock_engine_instance.process_image.side_effect = mock_process_image
-
-        with patch(
-            "socr.engines.gemini_api.GeminiAPIEngine",
-            return_value=mock_engine_instance,
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
+            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
         ):
-            with patch.object(state.handle, "render_page", return_value=MagicMock()):
-                result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+            mock_src_pdf = MagicMock()
+            mock_sub_pdf = MagicMock()
+            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
+            mock_src_pdf.__enter__ = lambda s: s
+            mock_src_pdf.__exit__ = MagicMock(return_value=False)
+
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
         assert result.status == DocumentStatus.SUCCESS
 
@@ -1833,13 +1810,8 @@ class TestNativeFirstPipeline:
         for i in [1, 2, 3]:
             assert state.pages[i].best_output.engine == "native"
 
-        # Scanned pages use VLM
-        for i in [4, 5]:
-            assert state.pages[i].best_output.engine == "gemini-api"
-            assert state.pages[i].best_output.text == f"VLM OCR for page {i}"
-
-        # VLM called for 2 scanned pages only
-        assert mock_engine_instance.process_image.call_count == 2
+        # CLI engine called once for the 2 scanned pages
+        mock_engine.process_document.assert_called_once()
 
     def test_fully_scanned_doc_falls_through_to_ocr(self) -> None:
         """A fully scanned doc (0% born-digital) should use the old OCR path."""
@@ -1904,55 +1876,57 @@ class TestNativeFirstPipeline:
         assert result.engine == "deepseek"
         mock_engine.process_document.assert_called_once()
 
-    def test_vlm_failure_falls_back_to_native_for_enhancement_pages(self) -> None:
-        """When VLM fails on a complex born-digital page, native text is used."""
+    def test_cli_failure_falls_back_to_native_for_enhancement_pages(self) -> None:
+        """When CLI fails on complex pages, native text is used as fallback."""
         pipeline, state = self._setup_bd_state(
             page_count=3,
             bd_pages={1, 2, 3},
             complex_pages={2},
         )
 
-        def mock_process_image(image, page_num=1, **kwargs):
-            return PageOutput(
-                page_num=page_num,
-                text="",
-                status=PageStatus.ERROR,
-                engine="gemini-api",
-                failure_mode=FailureMode.EMPTY_OUTPUT,
-                audit_passed=False,
-            )
+        # CLI engine fails
+        fail_result = EngineResult(
+            document_path=Path("/tmp/fake.pdf"),
+            engine="gemini",
+            status=DocumentStatus.ERROR,
+            failure_mode=FailureMode.EMPTY_OUTPUT,
+            error="CLI failed",
+        )
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = fail_result
 
-        mock_engine_instance = MagicMock()
-        mock_engine_instance.is_available.return_value = True
-        mock_engine_instance.process_image.side_effect = mock_process_image
-
-        with patch(
-            "socr.engines.gemini_api.GeminiAPIEngine",
-            return_value=mock_engine_instance,
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
+            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
         ):
-            with patch.object(state.handle, "render_page", return_value=MagicMock()):
-                result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+            mock_src_pdf = MagicMock()
+            mock_sub_pdf = MagicMock()
+            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
+            mock_src_pdf.__enter__ = lambda s: s
+            mock_src_pdf.__exit__ = MagicMock(return_value=False)
 
-        # Page 2 (complex, VLM failed) should fall back to native text
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Page 2 (complex, CLI failed) should fall back to native text
         assert state.pages[2].best_output is not None
         assert state.pages[2].best_output.engine == "native"
         assert state.pages[2].best_output.text == "Native text for page 2"
 
-    def test_vlm_unavailable_falls_back_to_native(self) -> None:
-        """When Gemini API is unavailable, enhancement pages use native text."""
+    def test_engine_unavailable_falls_back_to_native(self) -> None:
+        """When CLI engine is unavailable, enhancement pages use native text."""
         pipeline, state = self._setup_bd_state(
             page_count=4,
             bd_pages={1, 2, 3, 4},
             complex_pages={3},
         )
 
-        mock_engine_instance = MagicMock()
-        mock_engine_instance.is_available.return_value = False
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = False
 
-        with patch(
-            "socr.engines.gemini_api.GeminiAPIEngine",
-            return_value=mock_engine_instance,
-        ):
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
         # Prose pages should still have native text
@@ -1964,20 +1938,18 @@ class TestNativeFirstPipeline:
         assert state.pages[3].best_output.engine == "native"
         assert state.pages[3].best_output.text == "Native text for page 3"
 
-    def test_vlm_unavailable_scanned_pages_get_error(self) -> None:
-        """When VLM is unavailable, scanned pages (no native text) get an error."""
+    def test_engine_unavailable_scanned_pages_get_error(self) -> None:
+        """When engine is unavailable, scanned pages (no native text) get error."""
         pipeline, state = self._setup_bd_state(
             page_count=3,
             bd_pages={1, 2},  # page 3 is scanned
         )
 
-        mock_engine_instance = MagicMock()
-        mock_engine_instance.is_available.return_value = False
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = False
 
-        with patch(
-            "socr.engines.gemini_api.GeminiAPIEngine",
-            return_value=mock_engine_instance,
-        ):
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline._backbone_native_first(state, Path("/tmp/out"))
 
         # Scanned page 3 should have an error
@@ -2039,30 +2011,23 @@ class TestNativeFirstPipeline:
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = assessment
 
-        def mock_process_image(image, page_num=1, **kwargs):
-            return PageOutput(
-                page_num=page_num,
-                text=_good_text(),
-                status=PageStatus.SUCCESS,
-                engine="gemini-api",
-                audit_passed=True,
-            )
-
-        mock_engine_instance = MagicMock()
-        mock_engine_instance.is_available.return_value = True
-        mock_engine_instance.process_image.side_effect = mock_process_image
+        cli_result = _make_engine_result(text=_good_text(), engine="gemini")
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = cli_result
 
         with (
             patch.object(DocumentHandle, "from_path", return_value=_make_handle(3)),
-            patch(
-                "socr.engines.gemini_api.GeminiAPIEngine",
-                return_value=mock_engine_instance,
-            ),
-            patch(
-                "socr.core.document.DocumentHandle.render_page",
-                return_value=MagicMock(),
-            ),
+            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
+            patch("socr.pipeline.orchestrator.fitz") as mock_fitz,
         ):
+            mock_src_pdf = MagicMock()
+            mock_sub_pdf = MagicMock()
+            mock_fitz.open.side_effect = [mock_src_pdf, mock_sub_pdf]
+            mock_src_pdf.__enter__ = lambda s: s
+            mock_src_pdf.__exit__ = MagicMock(return_value=False)
+
             result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
 
         assert result.success

@@ -14,7 +14,7 @@ ENGINE_CHOICES = [
     e.value for e in EngineType
     if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)
 ]
-# "auto" probes engines in priority order; gemini-api is HTTP (not CLI)
+# "auto" probes CLI engines in priority order
 
 
 class PDFShortcutGroup(click.Group):
@@ -172,8 +172,8 @@ def process(
         config.hpc.enabled = True
         config.hpc.sequential = True
         pipeline = HPCPipeline(config)
-    elif unified or config.multi_engine or config.primary_engine == EngineType.GEMINI_API:
-        # Per-page HTTP engines and multi-engine require UnifiedPipeline
+    elif unified or config.multi_engine:
+        # Multi-engine and explicit --unified require UnifiedPipeline
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         pipeline = UnifiedPipeline(config)
@@ -241,11 +241,7 @@ def batch(
             console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
 
     # Select pipeline
-    use_unified = (
-        unified
-        or config.multi_engine
-        or config.primary_engine == EngineType.GEMINI_API
-    )
+    use_unified = unified or config.multi_engine
 
     if use_unified:
         from socr.pipeline.orchestrator import UnifiedPipeline
@@ -293,15 +289,6 @@ def engines() -> None:
         available = engine.is_available()
         status = "[green]+[/green]" if available else "[red]x[/red]"
         console.print(f"  [{status}] {engine_type.value:<12} [dim]{desc}[/dim]")
-
-    # Per-page HTTP engines (not in CLI registry)
-    from socr.engines.gemini_api import GeminiAPIEngine
-
-    gemini_api = GeminiAPIEngine()
-    available = gemini_api.is_available()
-    gemini_api.close()
-    status = "[green]+[/green]" if available else "[red]x[/red]"
-    console.print(f"  [{status}] {'gemini-api':<12} [dim]cloud, per-page HTTP API (no truncation)[/dim]")
 
     # Show what auto would select
     auto_choice = resolve_auto_engine()

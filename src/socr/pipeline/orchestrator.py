@@ -17,9 +17,9 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import fitz
 from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
@@ -254,17 +254,13 @@ class UnifiedPipeline:
 
         When ``native_first`` is enabled and the document is mostly
         born-digital, uses native text for prose pages and sends only
-        complex pages (tables/figures/equations) and scanned pages to a
-        VLM engine.  Otherwise falls through to the original full-OCR path.
-
-        For per-page HTTP engines (``GEMINI_API``, ``DEEPSEEK_VLLM``), render
-        each page as an image and process independently via the HTTP API.
+        complex/scanned pages to a CLI engine via a temp PDF.
 
         For CLI engines, if the document exceeds ``config.chunk_threshold``
         pages, split it into chunks and process each chunk independently via
         :meth:`_backbone_chunked`.
         """
-        # Native-first: use native text for born-digital prose, VLM only
+        # Native-first: use native text for born-digital prose, CLI only
         # for complex/scanned pages.
         if self.config.native_first:
             bd_pages = [
@@ -273,10 +269,6 @@ class UnifiedPipeline:
             bd_ratio = len(bd_pages) / max(len(state.pages), 1)
             if bd_ratio >= 0.5:
                 return self._backbone_native_first(state, output_dir)
-
-        # Per-page HTTP engines -- bypass CLI entirely
-        if self.config.primary_engine == EngineType.GEMINI_API:
-            return self._backbone_per_page(state, output_dir)
 
         engine = get_engine(self.config.primary_engine)
 
@@ -322,15 +314,13 @@ class UnifiedPipeline:
         For each page:
           - Born-digital prose (no tables/figures/equations): use native text
             directly as final output.
-          - Born-digital with complex content: send to VLM for enhancement.
-          - Scanned (no text layer): send to VLM for full OCR.
+          - Born-digital with complex content: send to CLI engine.
+          - Scanned (no text layer): send to CLI engine.
 
-        Only the pages that need VLM processing are rendered and sent to the
-        Gemini API engine.  Prose pages are "free" -- no API calls, no
-        latency, 100% faithful to the original text.
+        Only the pages that need OCR are extracted into a temporary PDF and
+        sent to the primary CLI engine.  Prose pages are "free" -- no engine
+        calls, no latency, 100% faithful to the original text.
         """
-        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
-
         # Classify pages
         prose_pages: list[int] = []
         enhancement_pages: list[int] = []
@@ -345,34 +335,32 @@ class UnifiedPipeline:
                 scanned_pages.append(page_num)
 
         total = len(state.pages)
-        vlm_pages = enhancement_pages + scanned_pages
+        ocr_pages = enhancement_pages + scanned_pages
 
         if not self.config.quiet:
             console.print(
-                f"\n[cyan]Phase 2:[/cyan] Text extraction (native-first)"
+                "\n[cyan]Phase 2:[/cyan] Text extraction (native-first)"
             )
             if prose_pages:
                 console.print(
                     f"  {len(prose_pages)}/{total} pages: "
-                    f"native text (born-digital prose)"
+                    "native text (born-digital prose)"
                 )
             if enhancement_pages:
                 console.print(
                     f"  {len(enhancement_pages)}/{total} pages: "
-                    f"VLM (tables/figures/equations)"
+                    "OCR (tables/figures/equations)"
                 )
             if scanned_pages:
                 console.print(
                     f"  {len(scanned_pages)}/{total} pages: "
-                    f"VLM (scanned, no text layer)"
+                    "OCR (scanned, no text layer)"
                 )
 
         start_time = time.time()
         page_outputs: list[PageOutput] = []
 
         # 1. Set native text as final output for prose pages.
-        #    Page outputs are collected here; state.apply_result() at the
-        #    end adds them to attempts and sets best_output.
         for page_num in prose_pages:
             ps = state.pages[page_num]
             page_out = PageOutput(
@@ -384,97 +372,103 @@ class UnifiedPipeline:
             )
             page_outputs.append(page_out)
 
-        # 2. Process VLM pages (enhancement + scanned) if any
-        if vlm_pages:
-            engine = GeminiAPIEngine(
-                GeminiAPIConfig(model=self.config.gemini_model)
-            )
+        # 2. Process OCR pages via CLI engine on a temp sub-PDF
+        if ocr_pages:
+            engine = get_engine(self.config.primary_engine)
 
             if not engine.is_available():
-                logger.warning("Gemini API not available for VLM enhancement")
+                engine_name = engine.name
+                logger.warning(f"{engine_name} not available for native-first OCR")
                 if not self.config.quiet:
                     console.print(
-                        "  [yellow]Gemini API not available -- "
+                        f"  [yellow]{engine_name} not available -- "
                         "using native text as fallback[/yellow]"
                     )
-                # Fall back to native text for enhancement pages;
-                # scanned pages get an error.
                 for page_num in enhancement_pages:
                     ps = state.pages[page_num]
                     if ps.native_text:
-                        page_out = PageOutput(
+                        page_outputs.append(PageOutput(
                             page_num=page_num,
                             text=ps.native_text,
                             status=PageStatus.SUCCESS,
                             engine="native",
                             audit_passed=True,
-                        )
-                        page_outputs.append(page_out)
+                        ))
                 for page_num in scanned_pages:
-                    page_out = PageOutput(
+                    page_outputs.append(PageOutput(
                         page_num=page_num,
                         text="",
                         status=PageStatus.ERROR,
-                        engine="gemini-api",
+                        engine=engine.name,
                         failure_mode=FailureMode.MODEL_UNAVAILABLE,
-                    )
-                    page_outputs.append(page_out)
+                    ))
             else:
-                for page_num in vlm_pages:
+                # Create a temp PDF with only the pages that need OCR
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    tmp_path = Path(tmpdir)
+                    sub_pdf_path = tmp_path / "ocr_pages.pdf"
+
+                    # Extract needed pages into a sub-PDF (0-indexed for fitz)
+                    with fitz.open(state.handle.path) as src_pdf:
+                        sub_pdf = fitz.open()
+                        for page_num in sorted(ocr_pages):
+                            sub_pdf.insert_pdf(
+                                src_pdf,
+                                from_page=page_num - 1,
+                                to_page=page_num - 1,
+                            )
+                        sub_pdf.save(sub_pdf_path)
+                        sub_pdf.close()
+
                     if not self.config.quiet:
-                        label = (
-                            "complex" if page_num in enhancement_pages
-                            else "scanned"
-                        )
                         console.print(
-                            f"  Page {page_num}/{total} ({label})...",
-                            end=" ",
+                            f"  Running {engine.name} on "
+                            f"{len(ocr_pages)} pages..."
                         )
 
-                    image = state.handle.render_page(
-                        page_num, dpi=self.config.render_dpi
+                    cli_result = engine.process_document(
+                        sub_pdf_path, tmp_path / "out", self.config,
                     )
-                    # Pass content hint for task-specific prompts
-                    hint = (
-                        "complex" if page_num in enhancement_pages
-                        else ""
-                    )
-                    page_result = engine.process_image(
-                        image, page_num=page_num, prompt_hint=hint,
-                    )
-                    page_outputs.append(page_result)
 
-                    # For enhancement pages where VLM failed, fall back
-                    # to native text.  Add the native fallback to
-                    # page_outputs so apply_result picks it up.
-                    ps = state.pages[page_num]
-                    if (
-                        page_result.status != PageStatus.SUCCESS
-                        and page_num in enhancement_pages
-                        and ps.native_text
-                    ):
-                        native_out = PageOutput(
-                            page_num=page_num,
-                            text=ps.native_text,
+                    if cli_result.success and cli_result.markdown:
+                        # CLI returns whole-doc text; wrap as single output
+                        # covering all OCR pages.
+                        for page_num in ocr_pages:
+                            page_outputs.append(PageOutput(
+                                page_num=page_num,
+                                text="",  # filled by assemble from whole-doc
+                                status=PageStatus.SUCCESS,
+                                engine=engine.name,
+                            ))
+                        # Store the whole-doc OCR text as page_num=0
+                        page_outputs.append(PageOutput(
+                            page_num=0,
+                            text=cli_result.markdown,
                             status=PageStatus.SUCCESS,
-                            engine="native",
-                            audit_passed=True,
-                        )
-                        page_outputs.append(native_out)
-
-                    if not self.config.quiet:
-                        if page_result.status == PageStatus.SUCCESS:
-                            console.print(
-                                f"[green]{page_result.word_count} words"
-                                f"[/green]"
-                            )
-                        else:
-                            fm = page_result.failure_mode
-                            console.print(
-                                f"[red]{fm.value}[/red]"
-                            )
-
-                engine.close()
+                            engine=engine.name,
+                            processing_time=cli_result.processing_time,
+                        ))
+                    else:
+                        # CLI failed — fall back to native text where possible
+                        for page_num in enhancement_pages:
+                            ps = state.pages[page_num]
+                            if ps.native_text:
+                                page_outputs.append(PageOutput(
+                                    page_num=page_num,
+                                    text=ps.native_text,
+                                    status=PageStatus.SUCCESS,
+                                    engine="native",
+                                    audit_passed=True,
+                                ))
+                        for page_num in scanned_pages:
+                            page_outputs.append(PageOutput(
+                                page_num=page_num,
+                                text="",
+                                status=PageStatus.ERROR,
+                                engine=engine.name,
+                                failure_mode=cli_result.failure_mode,
+                                error=cli_result.error or "",
+                            ))
 
         elapsed = time.time() - start_time
 
@@ -486,10 +480,9 @@ class UnifiedPipeline:
             else DocumentStatus.ERROR
         )
 
-        # Build a combined EngineResult so downstream phases work
         engine_name = "native"
-        if vlm_pages:
-            engine_name = "native+gemini-api"
+        if ocr_pages:
+            engine_name = f"native+{self.config.primary_engine.value}"
 
         result = EngineResult(
             document_path=state.handle.path,
@@ -581,143 +574,6 @@ class UnifiedPipeline:
         state.apply_result(result)
         return result
 
-    def _backbone_per_page(
-        self,
-        state: DocumentState,
-        output_dir: Path,
-    ) -> EngineResult:
-        """Run a per-page HTTP engine on every page individually.
-
-        Renders each page to an image, sends it to the engine's
-        ``process_image`` method, and assembles the per-page PageOutputs
-        into a single EngineResult.
-        """
-        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
-
-        engine = GeminiAPIEngine(
-            GeminiAPIConfig(model=self.config.gemini_model)
-        )
-
-        if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 2:[/cyan] Backbone OCR [{engine.name}] "
-                f"(per-page)"
-            )
-
-        if not engine.is_available():
-            logger.warning(f"Engine {engine.name} not available")
-            if not self.config.quiet:
-                console.print(f"[red]Engine {engine.name} not available[/red]")
-            err_result = EngineResult(
-                document_path=state.handle.path,
-                engine=engine.name,
-                status=DocumentStatus.ERROR,
-                error=f"Engine {engine.name} not available (missing API key)",
-            )
-            state.apply_result(err_result)
-            return err_result
-
-        start_time = time.time()
-        total_pages = state.handle.page_count
-        dpi = self.config.render_dpi
-        max_workers = min(self.config.max_concurrent_pages, total_pages)
-
-        if max_workers <= 1:
-            # Sequential fallback
-            page_outputs = self._per_page_sequential(
-                engine, state, total_pages, dpi
-            )
-        else:
-            page_outputs = self._per_page_concurrent(
-                engine, state, total_pages, dpi, max_workers
-            )
-
-        elapsed = time.time() - start_time
-        engine.close()
-
-        success_count = sum(
-            1 for p in page_outputs if p.status == PageStatus.SUCCESS
-        )
-        overall_status = (
-            DocumentStatus.SUCCESS if success_count > 0
-            else DocumentStatus.ERROR
-        )
-
-        result = EngineResult(
-            document_path=state.handle.path,
-            engine=engine.name,
-            status=overall_status,
-            pages=page_outputs,
-            pages_processed=total_pages,
-            processing_time=elapsed,
-            model_version=engine.model_version,
-        )
-        state.apply_result(result)
-        return result
-
-    def _per_page_sequential(
-        self, engine, state: DocumentState, total_pages: int, dpi: int,
-    ) -> list[PageOutput]:
-        """Process pages one at a time (original behavior)."""
-        page_outputs: list[PageOutput] = []
-        for page_num in range(1, total_pages + 1):
-            if not self.config.quiet:
-                console.print(f"  Page {page_num}/{total_pages}...", end=" ")
-
-            image = state.handle.render_page(page_num, dpi=dpi)
-            page_result = engine.process_image(image, page_num=page_num)
-            page_outputs.append(page_result)
-
-            if not self.config.quiet:
-                if page_result.status == PageStatus.SUCCESS:
-                    console.print(f"[green]{page_result.word_count} words[/green]")
-                else:
-                    console.print(f"[red]{page_result.failure_mode.value}[/red]")
-        return page_outputs
-
-    def _per_page_concurrent(
-        self, engine, state: DocumentState, total_pages: int, dpi: int,
-        max_workers: int,
-    ) -> list[PageOutput]:
-        """Process pages concurrently via ThreadPoolExecutor."""
-        if not self.config.quiet:
-            console.print(f"  [dim]Processing {total_pages} pages ({max_workers} concurrent)[/dim]")
-
-        # Pre-render all page images (CPU-bound, fast)
-        images: dict[int, object] = {}
-        for page_num in range(1, total_pages + 1):
-            images[page_num] = state.handle.render_page(page_num, dpi=dpi)
-
-        results_map: dict[int, PageOutput] = {}
-
-        def _process_page(page_num: int) -> tuple[int, PageOutput]:
-            result = engine.process_image(images[page_num], page_num=page_num)
-            return page_num, result
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(_process_page, pn): pn
-                for pn in range(1, total_pages + 1)
-            }
-            for future in as_completed(futures):
-                page_num, page_result = future.result()
-                results_map[page_num] = page_result
-
-                if not self.config.quiet:
-                    if page_result.status == PageStatus.SUCCESS:
-                        console.print(
-                            f"  Page {page_num}/{total_pages}: "
-                            f"[green]{page_result.word_count} words[/green]"
-                        )
-                    else:
-                        console.print(
-                            f"  Page {page_num}/{total_pages}: "
-                            f"[red]{page_result.failure_mode.value}[/red]"
-                        )
-
-        # Return in page order
-        return [results_map[pn] for pn in range(1, total_pages + 1)]
-
     # ------------------------------------------------------------------
     # Phase 2 (multi-engine): Backbone OCR with multiple engines
     # ------------------------------------------------------------------
@@ -727,7 +583,7 @@ class UnifiedPipeline:
         state: DocumentState,
         output_dir: Path,
     ) -> list[EngineResult]:
-        """Run multiple engines on the document and collect all results.
+        """Run multiple CLI engines on the document and collect all results.
 
         Each engine's output is applied to DocumentState via
         ``state.apply_result()``, so per-page attempts accumulate across
@@ -751,40 +607,33 @@ class UnifiedPipeline:
                     end="",
                 )
 
-            if engine_type == EngineType.GEMINI_API:
-                result = self._backbone_per_page(state, output_dir)
-            else:
-                try:
-                    engine = get_engine(engine_type)
-                except ValueError:
-                    if not self.config.quiet:
-                        console.print(
-                            f" [red]not supported[/red]"
-                        )
-                    continue
+            try:
+                engine = get_engine(engine_type)
+            except ValueError:
+                if not self.config.quiet:
+                    console.print(" [red]not supported[/red]")
+                continue
 
-                if not engine.is_available():
-                    if not self.config.quiet:
-                        console.print(
-                            f" [yellow]not available[/yellow]"
-                        )
-                    continue
+            if not engine.is_available():
+                if not self.config.quiet:
+                    console.print(" [yellow]not available[/yellow]")
+                continue
 
-                # Chunk long documents as in single-engine mode
-                if state.handle.page_count > self.config.chunk_threshold:
-                    if not self.config.quiet:
-                        n_chunks = -(-state.handle.page_count // self.config.chunk_size)
-                        console.print(
-                            f" (chunked, {n_chunks} chunks)",
-                            end="",
-                        )
-                    result = self._backbone_chunked(state, output_dir, engine)
-                else:
-                    result = engine.process_document(
-                        state.handle.path, output_dir, self.config
+            # Chunk long documents as in single-engine mode
+            if state.handle.page_count > self.config.chunk_threshold:
+                if not self.config.quiet:
+                    n_chunks = -(-state.handle.page_count // self.config.chunk_size)
+                    console.print(
+                        f" (chunked, {n_chunks} chunks)",
+                        end="",
                     )
-                    result.pages_processed = state.handle.page_count
-                    state.apply_result(result)
+                result = self._backbone_chunked(state, output_dir, engine)
+            else:
+                result = engine.process_document(
+                    state.handle.path, output_dir, self.config
+                )
+                result.pages_processed = state.handle.page_count
+                state.apply_result(result)
 
             word_count = sum(p.word_count for p in result.pages)
             if not self.config.quiet:

@@ -1,6 +1,7 @@
 """GLM-OCR engine adapter.
 
-CLI: glm-ocr process <path> -o <dir> [--backend ollama|transformers|vllm]
+CLI: glm-ocr process <path> -o <dir> [--task text|formula|table|figure]
+     [--backend ollama|transformers|vllm] [--dpi N] [-w N] [-q]
 Click group — requires explicit 'process' subcommand.
 """
 
@@ -65,6 +66,18 @@ class GLMEngine(BaseEngine):
             "process",
             str(pdf_path),
             "-o", str(output_dir),
+            "--task", config.glm_task,
             "--backend", config.glm_backend,
+            "--dpi", str(config.render_dpi),
         ]
+        if config.workers > 1:
+            cmd.extend(["-w", str(config.workers)])
+        if config.save_figures:
+            cmd.append("--analyze-figures")
+        if config.quiet:
+            cmd.append("-q")
+        if config.verbose:
+            cmd.append("--verbose")
+        if config.reprocess:
+            cmd.append("--reprocess")
         return cmd

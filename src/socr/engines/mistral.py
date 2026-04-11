@@ -1,7 +1,7 @@
 """Mistral OCR engine adapter.
 
-CLI: mistral-ocr <path> -o <dir> [--model] [--reprocess]
-Flat @click.command — no subcommands. No -q flag.
+CLI: mistral-ocr <path> -o <dir> [--model] [-w N] [--max-pages N] [-q]
+Flat @click.command. Uses Mistral AI OCR API with structured per-page output.
 """
 
 import os
@@ -22,6 +22,10 @@ class MistralEngine(BaseEngine):
     def cli_command(self) -> str:
         return "mistral-ocr"
 
+    @property
+    def model_version(self) -> str:
+        return "mistral-ocr-latest"
+
     def is_available(self) -> bool:
         if not os.environ.get("MISTRAL_API_KEY"):
             return False
@@ -39,4 +43,16 @@ class MistralEngine(BaseEngine):
             "-o", str(output_dir),
             "--model", config.mistral_model,
         ]
+        if config.workers > 1:
+            cmd.extend(["-w", str(config.workers)])
+        if config.save_figures:
+            cmd.append("--include-images")
+        else:
+            cmd.append("--no-images")
+        if config.quiet:
+            cmd.append("-q")
+        if config.verbose:
+            cmd.append("-v")
+        if config.reprocess:
+            cmd.append("--reprocess")
         return cmd

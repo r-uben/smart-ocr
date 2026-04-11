@@ -32,37 +32,23 @@ def get_engine(engine_type: EngineType) -> BaseEngine:
 
 
 def resolve_auto_engine() -> EngineType:
-    """Probe engines in priority order and return the first available one.
+    """Probe CLI engines in priority order and return the first available one.
 
-    Checks both CLI engines (via registry) and the Gemini API engine
-    (which is HTTP-based and not in the CLI registry).
-
-    Returns EngineType.GEMINI_API or a CLI engine type. Falls back to
-    DEEPSEEK (original default) if nothing is available, letting
-    downstream code produce a clear error.
+    Returns the first engine whose CLI is installed and whose dependencies
+    (API keys, Ollama models, etc.) are satisfied. Falls back to GEMINI
+    if nothing is available, letting downstream code produce a clear error.
     """
     for engine_type in AUTO_ENGINE_ORDER:
         try:
-            if engine_type == EngineType.GEMINI_API:
-                # Gemini API is HTTP-based, not in CLI registry
-                from socr.engines.gemini_api import GeminiAPIEngine
-
-                engine = GeminiAPIEngine()
-                if engine.is_available():
-                    engine.close()
-                    logger.info(f"Auto-selected engine: {engine_type.value}")
-                    return engine_type
-                engine.close()
-            else:
-                cli_engine = _ENGINES.get(engine_type)
-                if cli_engine is None:
-                    continue
-                instance = cli_engine()
-                if instance.is_available():
-                    logger.info(f"Auto-selected engine: {engine_type.value}")
-                    return engine_type
+            cli_engine = _ENGINES.get(engine_type)
+            if cli_engine is None:
+                continue
+            instance = cli_engine()
+            if instance.is_available():
+                logger.info(f"Auto-selected engine: {engine_type.value}")
+                return engine_type
         except Exception:
             continue
 
-    logger.warning("No engines available; falling back to deepseek (will likely fail)")
-    return EngineType.DEEPSEEK
+    logger.warning("No engines available; falling back to gemini (will likely fail)")
+    return EngineType.GEMINI
