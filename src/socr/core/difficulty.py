@@ -55,7 +55,12 @@ _MIN_TEXT_BLOCKS_EASY = 1  # Must have at least some text
 _MAX_TEXT_BLOCKS_EASY = 30  # Dense multi-block layouts are complex
 
 
-def classify_page(page: fitz.Page, page_num: int) -> DifficultyAssessment:
+def classify_page(
+    page: fitz.Page,
+    page_num: int,
+    has_tables_hint: bool = False,
+    has_equations_hint: bool = False,
+) -> DifficultyAssessment:
     """Classify a single page's difficulty for OCR.
 
     This is fast — no rendering, no API calls. Uses PyMuPDF's structural
@@ -64,11 +69,27 @@ def classify_page(page: fitz.Page, page_num: int) -> DifficultyAssessment:
     Args:
         page: A PyMuPDF page object.
         page_num: 1-indexed page number.
+        has_tables_hint: If True (from born-digital detector), force HARD.
+        has_equations_hint: If True (from born-digital detector), force HARD.
 
     Returns:
         DifficultyAssessment with difficulty level and reasons.
     """
     reasons: list[str] = []
+
+    # Hints from born-digital detector override PyMuPDF analysis
+    if has_tables_hint:
+        return DifficultyAssessment(
+            page_num=page_num,
+            difficulty=PageDifficulty.HARD,
+            reasons=["tables detected (born-digital hint)"],
+        )
+    if has_equations_hint:
+        return DifficultyAssessment(
+            page_num=page_num,
+            difficulty=PageDifficulty.HARD,
+            reasons=["equations detected (born-digital hint)"],
+        )
 
     # Count structural elements
     try:
@@ -147,23 +168,32 @@ def classify_page(page: fitz.Page, page_num: int) -> DifficultyAssessment:
 def classify_pages(
     pdf_path: str,
     page_nums: list[int],
+    page_hints: dict[int, dict] | None = None,
 ) -> dict[int, DifficultyAssessment]:
     """Classify multiple pages from a PDF.
 
     Args:
         pdf_path: Path to the PDF file.
         page_nums: 1-indexed page numbers to classify.
+        page_hints: Optional dict of {page_num: {"has_tables": bool,
+            "has_equations": bool}} from born-digital detection.
 
     Returns:
         Dict mapping page_num → DifficultyAssessment.
     """
+    hints = page_hints or {}
     results: dict[int, DifficultyAssessment] = {}
     with fitz.open(pdf_path) as doc:
         for page_num in page_nums:
             if page_num < 1 or page_num > len(doc):
                 continue
             page = doc[page_num - 1]
-            results[page_num] = classify_page(page, page_num)
+            h = hints.get(page_num, {})
+            results[page_num] = classify_page(
+                page, page_num,
+                has_tables_hint=h.get("has_tables", False),
+                has_equations_hint=h.get("has_equations", False),
+            )
     return results
 
 

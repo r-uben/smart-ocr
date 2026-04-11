@@ -24,7 +24,7 @@ from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
-from socr.core.born_digital import BornDigitalDetector
+from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.chunker import PDFChunker
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
@@ -65,6 +65,7 @@ class UnifiedPipeline:
         self.scorer = FailureModeScorer(checker=self.heuristics)
         self.repair_router = RepairRouter(config)
         self.bd_detector = BornDigitalDetector()
+        self._last_assessment: DocumentAssessment | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -211,6 +212,7 @@ class UnifiedPipeline:
             console.print("\n[cyan]Phase 1:[/cyan] Analyze (born-digital detection)")
 
         assessment = self.bd_detector.detect(state.handle.path)
+        self._last_assessment = assessment
         state.apply_born_digital(assessment)
 
         bd_count = assessment.born_digital_count
@@ -350,9 +352,31 @@ class UnifiedPipeline:
                 local_engine_type = self.config.local_engine
 
         if local_engine_type and ocr_pages:
-            # Classify page difficulty
+            # Build hints from born-digital assessment
+            page_hints: dict[int, dict] = {}
+            for page_num in ocr_pages:
+                ps = state.pages[page_num]
+                bd_assessment = next(
+                    (pa for pa in (self._last_assessment or DocumentAssessment(path=state.handle.path, pages=[])).pages
+                     if pa.page_num == page_num),
+                    None,
+                )
+                if bd_assessment:
+                    page_hints[page_num] = {
+                        "has_tables": bd_assessment.has_tables,
+                        "has_equations": bd_assessment.has_equations,
+                    }
+                elif ps.needs_ocr_enhancement:
+                    # Fallback: if needs enhancement, assume hard
+                    page_hints[page_num] = {
+                        "has_tables": True,
+                        "has_equations": False,
+                    }
+
+            # Classify page difficulty with hints
             difficulty_map = classify_pages(
-                str(state.handle.path), ocr_pages
+                str(state.handle.path), ocr_pages,
+                page_hints=page_hints,
             )
             for page_num in ocr_pages:
                 da = difficulty_map.get(page_num)
