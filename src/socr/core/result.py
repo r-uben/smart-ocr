@@ -82,6 +82,7 @@ class PageOutput:
     figures: list[FigureInfo] = field(default_factory=list)
     audit_passed: bool = True
     audit_notes: list[str] = field(default_factory=list)
+    escalated_from: str = ""  # engine that failed, triggering escalation
 
     @property
     def word_count(self) -> int:

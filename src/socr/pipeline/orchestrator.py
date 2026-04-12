@@ -448,19 +448,56 @@ class UnifiedPipeline:
             ))
 
         # Tier 2: Local engine for easy pages
+        escalated_pages: list[int] = []
+        escalated_reasons: dict[int, str] = {}
+        local_engine_name = ""
         if easy_pages and local_engine_type:
             local_outputs = self._run_engine_on_pages(
                 state, easy_pages, enhancement_pages,
                 local_engine_type, "local",
             )
-            page_outputs.extend(local_outputs)
 
-        # Tier 3: Primary (cloud) engine for hard pages
-        if hard_pages:
+            # Per-page quality scoring on local outputs → auto-escalate failures
+            passed_outputs: list[PageOutput] = []
+            local_engine_name = get_engine(local_engine_type).name
+            for po in local_outputs:
+                if po.status != PageStatus.SUCCESS or po.engine == "native":
+                    passed_outputs.append(po)
+                    continue
+                scoring = self.scorer.score(po.text, engine=po.engine)
+                if scoring.passed:
+                    po.audit_passed = True
+                    passed_outputs.append(po)
+                else:
+                    # Escalate to cloud
+                    escalated_pages.append(po.page_num)
+                    escalated_reasons[po.page_num] = scoring.primary_failure.value
+                    logger.info(
+                        "Page %d failed local audit (%s) — escalating to cloud",
+                        po.page_num, scoring.primary_failure.value,
+                    )
+
+            page_outputs.extend(passed_outputs)
+
+            if escalated_pages and not self.config.quiet:
+                console.print(
+                    f"  [yellow]{len(escalated_pages)} page(s) failed "
+                    f"local audit → escalating to cloud[/yellow]"
+                )
+                for pn in escalated_pages:
+                    console.print(f"    p{pn}: {escalated_reasons[pn]}")
+
+        # Tier 3: Primary (cloud) engine for hard pages + escalated pages
+        cloud_pages = hard_pages + escalated_pages
+        if cloud_pages:
             cloud_outputs = self._run_engine_on_pages(
-                state, hard_pages, enhancement_pages,
+                state, cloud_pages, enhancement_pages,
                 self.config.primary_engine, "cloud",
             )
+            # Tag escalated pages so metadata tracks the promotion
+            for co in cloud_outputs:
+                if co.page_num in escalated_pages:
+                    co.escalated_from = local_engine_name
             page_outputs.extend(cloud_outputs)
 
         elapsed = time.time() - start_time

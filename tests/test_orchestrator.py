@@ -1880,3 +1880,249 @@ class TestNativeFirstPipeline:
         result = runner.invoke(process, ["--help"])
         assert result.exit_code == 0
         assert "--no-native-first" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Tier-2 per-page escalation
+# ---------------------------------------------------------------------------
+
+class TestTieredEscalation:
+    """Per-page audit scoring inside _backbone_native_first.
+
+    When local (Tier 2) outputs fail the per-page heuristic audit, those
+    pages should be removed from local results and re-routed to the cloud
+    engine (Tier 3).
+    """
+
+    def _setup(
+        self,
+        page_count: int = 5,
+        scanned_pages: set[int] | None = None,
+    ) -> tuple["UnifiedPipeline", "DocumentState"]:
+        """Tiered pipeline with all-scanned or custom pages."""
+        from socr.core.config import EngineType
+        config = _make_config(
+            quiet=True,
+            native_first=True,
+            tiered=True,
+            primary_engine=EngineType.GEMINI,
+            local_engine=EngineType.GLM,
+        )
+        pipeline = UnifiedPipeline(config)
+        # All pages are scanned (not born-digital) so they all go to OCR
+        scanned = scanned_pages or set(range(1, page_count + 1))
+        assessment = _make_bd_assessment(page_count, born_digital_pages=set())
+        state = DocumentState(handle=_make_handle(page_count))
+        state.apply_born_digital(assessment)
+        pipeline._last_assessment = assessment
+        return pipeline, state
+
+    def _mock_classify_pages(self, easy: set[int], hard: set[int]):
+        """Return a side_effect for classify_pages that splits pages."""
+        from socr.core.difficulty import DifficultyAssessment, PageDifficulty
+
+        def _classify(pdf_path, page_nums, page_hints=None):
+            result = {}
+            for pn in page_nums:
+                diff = PageDifficulty.EASY if pn in easy else PageDifficulty.HARD
+                result[pn] = DifficultyAssessment(page_num=pn, difficulty=diff, reasons=[])
+            return result
+        return _classify
+
+    def test_failing_local_pages_escalate_to_cloud(self) -> None:
+        """Pages where local OCR returns bad text must be re-sent to cloud."""
+        pipeline, state = self._setup(page_count=4)
+
+        # Local engine: page 2 returns garbage (too few words)
+        def local_process_pages(pdf_path, page_nums, config, dpi=200):
+            outputs = []
+            for pn in page_nums:
+                text = _bad_text() if pn == 2 else _good_text()
+                outputs.append(PageOutput(
+                    page_num=pn, text=text,
+                    status=PageStatus.SUCCESS, engine="glm",
+                ))
+            return outputs
+
+        # Cloud engine: returns good text for whatever pages it receives
+        cloud_page_nums_received = []
+        def cloud_process_pages(pdf_path, page_nums, config, dpi=200):
+            cloud_page_nums_received.extend(page_nums)
+            return [
+                PageOutput(
+                    page_num=pn, text=_good_text(),
+                    status=PageStatus.SUCCESS, engine="gemini",
+                )
+                for pn in page_nums
+            ]
+
+        local_engine = MagicMock()
+        local_engine.name = "glm"
+        local_engine.is_available.return_value = True
+        local_engine.process_pages.side_effect = local_process_pages
+
+        cloud_engine = MagicMock()
+        cloud_engine.name = "gemini"
+        cloud_engine.is_available.return_value = True
+        cloud_engine.process_pages.side_effect = cloud_process_pages
+
+        from socr.core.config import EngineType
+
+        def _get_engine(engine_type):
+            if engine_type == EngineType.GLM:
+                return local_engine
+            return cloud_engine
+
+        classify = self._mock_classify_pages(easy={1, 2, 3, 4}, hard=set())
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", side_effect=_get_engine),
+            patch(
+                "socr.engines.registry.resolve_local_engine",
+                return_value=EngineType.GLM,
+            ),
+            patch(
+                "socr.core.difficulty.classify_pages",
+                side_effect=classify,
+            ),
+        ):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Cloud must have received page 2 (escalated) — possibly with others
+        assert 2 in cloud_page_nums_received, (
+            f"Page 2 should be escalated to cloud; cloud got {cloud_page_nums_received}"
+        )
+
+    def test_passing_local_pages_do_not_escalate(self) -> None:
+        """Pages where local OCR passes audit should NOT be sent to cloud."""
+        pipeline, state = self._setup(page_count=3)
+
+        local_calls: list[list[int]] = []
+        cloud_calls: list[list[int]] = []
+
+        def local_process_pages(pdf_path, page_nums, config, dpi=200):
+            local_calls.append(list(page_nums))
+            return [
+                PageOutput(
+                    page_num=pn, text=_good_text(),
+                    status=PageStatus.SUCCESS, engine="glm",
+                )
+                for pn in page_nums
+            ]
+
+        def cloud_process_pages(pdf_path, page_nums, config, dpi=200):
+            cloud_calls.append(list(page_nums))
+            return [
+                PageOutput(
+                    page_num=pn, text=_good_text(),
+                    status=PageStatus.SUCCESS, engine="gemini",
+                )
+                for pn in page_nums
+            ]
+
+        local_engine = MagicMock()
+        local_engine.name = "glm"
+        local_engine.is_available.return_value = True
+        local_engine.process_pages.side_effect = local_process_pages
+
+        cloud_engine = MagicMock()
+        cloud_engine.name = "gemini"
+        cloud_engine.is_available.return_value = True
+        cloud_engine.process_pages.side_effect = cloud_process_pages
+
+        from socr.core.config import EngineType
+
+        def _get_engine(engine_type):
+            if engine_type == EngineType.GLM:
+                return local_engine
+            return cloud_engine
+
+        classify = self._mock_classify_pages(easy={1, 2, 3}, hard=set())
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", side_effect=_get_engine),
+            patch(
+                "socr.engines.registry.resolve_local_engine",
+                return_value=EngineType.GLM,
+            ),
+            patch(
+                "socr.core.difficulty.classify_pages",
+                side_effect=classify,
+            ),
+        ):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # No hard pages and all local passed: cloud should not be called at all
+        assert cloud_calls == [], (
+            f"Cloud should not be called when all local pages pass; got {cloud_calls}"
+        )
+
+    def test_escalated_pages_tagged_with_escalated_from(self) -> None:
+        """Pages escalated to cloud should carry escalated_from = local engine name."""
+        pipeline, state = self._setup(page_count=3)
+
+        def local_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn,
+                    # page 1 fails, pages 2-3 pass
+                    text=_bad_text() if pn == 1 else _good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="glm",
+                )
+                for pn in page_nums
+            ]
+
+        def cloud_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn, text=_good_text(),
+                    status=PageStatus.SUCCESS, engine="gemini",
+                )
+                for pn in page_nums
+            ]
+
+        local_engine = MagicMock()
+        local_engine.name = "glm"
+        local_engine.is_available.return_value = True
+        local_engine.process_pages.side_effect = local_process_pages
+
+        cloud_engine = MagicMock()
+        cloud_engine.name = "gemini"
+        cloud_engine.is_available.return_value = True
+        cloud_engine.process_pages.side_effect = cloud_process_pages
+
+        from socr.core.config import EngineType
+
+        def _get_engine(engine_type):
+            if engine_type == EngineType.GLM:
+                return local_engine
+            return cloud_engine
+
+        classify = self._mock_classify_pages(easy={1, 2, 3}, hard=set())
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", side_effect=_get_engine),
+            patch(
+                "socr.engines.registry.resolve_local_engine",
+                return_value=EngineType.GLM,
+            ),
+            patch(
+                "socr.core.difficulty.classify_pages",
+                side_effect=classify,
+            ),
+        ):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Find page 1 in final result pages
+        page1 = next(p for p in result.pages if p.page_num == 1)
+        assert page1.engine == "gemini", "Escalated page should be processed by cloud"
+        assert page1.escalated_from == "glm", (
+            f"escalated_from should be 'glm', got {page1.escalated_from!r}"
+        )
+
+        # Pages 2 and 3 should NOT be escalated
+        for pn in (2, 3):
+            page = next(p for p in result.pages if p.page_num == pn)
+            assert page.engine == "glm"
+            assert page.escalated_from == ""
