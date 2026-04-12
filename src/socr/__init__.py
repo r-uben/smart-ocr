@@ -1,6 +1,6 @@
 """socr - Multi-engine document OCR with cascading fallback."""
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle

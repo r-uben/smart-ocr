@@ -396,14 +396,41 @@ class BornDigitalDetector:
     def _detect_tables(self, page: fitz.Page) -> bool:
         """Check if the page contains table-like structures.
 
-        Uses PyMuPDF's built-in table detection (page.find_tables()).
+        Two passes:
+        1. PyMuPDF's built-in table detector (catches ruled/bordered tables).
+        2. Columnar-numeric heuristic (catches borderless regression tables
+           common in academic PDFs — whitespace-aligned columns of numbers
+           that find_tables() cannot see).
         """
         try:
             tables = page.find_tables()
-            return len(tables.tables) > 0
+            if len(tables.tables) > 0:
+                return True
         except Exception:
-            # find_tables() can fail on malformed pages; treat as no tables
+            pass
+
+        return self._detect_columnar_numbers(page)
+
+    @staticmethod
+    def _detect_columnar_numbers(page: fitz.Page) -> bool:
+        """Detect borderless tables via single-token line ratio.
+
+        When PyMuPDF extracts text from a PDF table whose columns are
+        whitespace-aligned (no drawn borders), each table cell lands on
+        its own line as a single token.  Prose pages never exhibit this:
+        a justified paragraph produces multi-word lines.
+
+        Heuristic: if >50% of non-empty lines are single-token AND there
+        are at least 15 such lines, the page is almost certainly tabular.
+        The count floor avoids false-positives on short pages with headers
+        or bullet lists.
+        """
+        lines = page.get_text("text").splitlines()
+        nonempty = [l.strip() for l in lines if l.strip()]
+        if not nonempty:
             return False
+        single_token = sum(1 for l in nonempty if len(l.split()) == 1)
+        return single_token >= 15 and single_token / len(nonempty) > 0.50
 
     def _detect_equations(self, text: str) -> bool:
         """Check if text contains mathematical notation.
