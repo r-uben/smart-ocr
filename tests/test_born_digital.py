@@ -1,6 +1,7 @@
 """Tests for born-digital PDF detection."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import fitz
 import pytest
@@ -719,6 +720,96 @@ class TestEquationDetection:
         page = result.pages[0]
 
         assert page.needs_ocr_enhancement
+
+
+class TestMathFontDetection:
+    """Tests for font-based math detection (_detect_math_fonts).
+
+    The primary motivation: PyMuPDF mangles math typeset with CM/STIX fonts
+    (superscripts flatten, Greek drops) but the *extracted text* looks fine
+    to any string-based checker.  Font metadata is the only reliable pre-
+    extraction signal.
+    """
+
+    def test_cmmi_font_detected(self) -> None:
+        """CMMI (Computer Modern Math Italic) triggers detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (1, "otf", "Type1", "CMMI10", "CMMI10", "WinAnsi"),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_cmsy_font_detected(self) -> None:
+        """CMSY (Computer Modern Symbol) triggers detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (2, "otf", "Type1", "CMSY10", "CMSY10", "WinAnsi"),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_ams_fonts_detected(self) -> None:
+        """MSAM/MSBM (AMS symbol fonts) trigger detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (3, "otf", "Type1", "MSAM10", "MSAM10", "WinAnsi"),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_stix_math_detected(self) -> None:
+        """STIXMath (modern OpenType math) triggers detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (4, "otf", "TrueType", "STIXMath-Regular", "STIXMath-Regular", ""),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_latin_modern_math_detected(self) -> None:
+        """LatinModernMath triggers detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (5, "otf", "TrueType", "LatinModernMath-Regular", "LMMath", ""),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_subset_prefix_handled(self) -> None:
+        """Subset-prefixed names like 'ABCDEF+CMMI10' are matched correctly."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (6, "otf", "Type1", "ABCDEF+CMMI10", "CMMI10", "WinAnsi"),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_prose_fonts_not_detected(self) -> None:
+        """Common text fonts (Times, Helvetica) do not trigger detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (1, "otf", "TrueType", "Times-Roman", "Times-Roman", "WinAnsi"),
+            (2, "otf", "TrueType", "Helvetica-Bold", "Helvetica-Bold", "WinAnsi"),
+            (3, "otf", "TrueType", "Arial-Italic", "Arial-Italic", "WinAnsi"),
+        ]
+        assert not BornDigitalDetector._detect_math_fonts(page)
+
+    def test_empty_font_list(self) -> None:
+        """Page with no fonts returns False (scanned/image page)."""
+        page = MagicMock()
+        page.get_fonts.return_value = []
+        assert not BornDigitalDetector._detect_math_fonts(page)
+
+    def test_get_fonts_exception_returns_false(self) -> None:
+        """If get_fonts() raises, detection degrades gracefully to False."""
+        page = MagicMock()
+        page.get_fonts.side_effect = RuntimeError("PDF corruption")
+        assert not BornDigitalDetector._detect_math_fonts(page)
+
+    def test_mixed_prose_and_math_fonts(self) -> None:
+        """A page with both prose and math fonts (inline equations) is detected."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (1, "otf", "TrueType", "Times-Roman", "Times-Roman", "WinAnsi"),
+            (2, "otf", "Type1", "CMMI10", "CMMI10", "WinAnsi"),   # inline math
+            (3, "otf", "TrueType", "Helvetica", "Helvetica", "WinAnsi"),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,20 @@ from pathlib import Path
 
 import fitz
 
+# Font families used exclusively for typeset mathematics in LaTeX/LuaTeX/XeTeX.
+# These appear in basefont names regardless of whether PyMuPDF's text extraction
+# still looks like math — which it often doesn't (subscripts flattened, Greek
+# dropped, reading order broken).  A single match means the page has real math.
+#
+# Uses re.search (not re.match) to handle subset-prefixed names like
+# "ABCDEF+CMMI10".
+_MATH_FONT_RE = re.compile(
+    r"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|"          # Computer Modern + AMS math
+    r"STIXMath|XITSMath|LatinModernMath|LMMath|"  # OpenType math (modern LaTeX)
+    r"AsanaMath|LibertinusMath|CambriaMath|NewCMMath|"  # other OTF math families
+    r"Euler|rsfs)"                              # Euler script, RSFS (calligraphic)
+)
+
 
 @dataclass
 class PageAssessment:
@@ -194,7 +208,7 @@ class BornDigitalDetector:
         # Detect structured content types
         has_tables = self._detect_tables(page)
         has_figures = has_images  # figures = embedded raster images
-        has_equations = self._detect_equations(raw_text)
+        has_equations = self._detect_math_fonts(page) or self._detect_equations(raw_text)
 
         # --- Decision logic ---
 
@@ -432,10 +446,42 @@ class BornDigitalDetector:
         single_token = sum(1 for l in nonempty if len(l.split()) == 1)
         return single_token >= 15 and single_token / len(nonempty) > 0.50
 
-    def _detect_equations(self, text: str) -> bool:
-        """Check if text contains mathematical notation.
+    @staticmethod
+    def _detect_math_fonts(page: fitz.Page) -> bool:
+        """Detect mathematical content via PDF font metadata (source-side).
 
-        Looks for LaTeX-like patterns that indicate equations or math content.
+        PyMuPDF's text extraction silently mangles math typeset with Computer
+        Modern, STIX, or similar math fonts: subscripts flatten, Greek letters
+        drop, reading order breaks around equations.  The *extracted text*
+        looks like normal prose to any string-based checker — so we must read
+        the font names embedded in the PDF before extraction ever runs.
+
+        A single match anywhere on the page is sufficient: even one inline math
+        span (e.g., ``β̂`` mid-sentence) is enough to corrupt that passage.
+
+        Uses ``page.get_fonts()`` only — it lists all fonts used on the page
+        and is O(font_count), far cheaper than a full dict extraction.  Font
+        subsets are handled transparently because we use ``re.search`` rather
+        than ``re.match``, so ``ABCDEF+CMMI10`` still matches ``CMMI``.
+        """
+        try:
+            for font in page.get_fonts():
+                # font tuple: (xref, ext, type, basefont, name, encoding, ...)
+                basefont = font[3] if len(font) > 3 else ""
+                if basefont and _MATH_FONT_RE.search(basefont):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _detect_equations(self, text: str) -> bool:
+        """Check if text contains raw LaTeX math markup.
+
+        This is a secondary fallback for PDFs that embed literal LaTeX strings
+        (rare in typeset documents, but possible in some preprint formats).
+        Font-based detection (_detect_math_fonts) is the primary signal and
+        runs first.
+
         Inline dollar signs are common in non-math contexts (currency), so we
         require paired delimiters or explicit LaTeX commands.
         """
