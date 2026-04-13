@@ -461,15 +461,25 @@ class UnifiedPipeline:
             passed_outputs: list[PageOutput] = []
             local_engine_name = get_engine(local_engine_type).name
             for po in local_outputs:
-                if po.status != PageStatus.SUCCESS or po.engine == "native":
+                # Native passthrough — born-digital prose, keep as-is
+                if po.engine == "native":
                     passed_outputs.append(po)
+                    continue
+                # Engine error — escalate rather than ship a blank page
+                if po.status != PageStatus.SUCCESS:
+                    escalated_pages.append(po.page_num)
+                    escalated_reasons[po.page_num] = "engine_error"
+                    logger.info(
+                        "Page %d errored on local engine — escalating to cloud",
+                        po.page_num,
+                    )
                     continue
                 scoring = self.scorer.score(po.text, engine=po.engine)
                 if scoring.passed:
                     po.audit_passed = True
                     passed_outputs.append(po)
                 else:
-                    # Escalate to cloud
+                    # Quality failure — escalate to cloud
                     escalated_pages.append(po.page_num)
                     escalated_reasons[po.page_num] = scoring.primary_failure.value
                     logger.info(

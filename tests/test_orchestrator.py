@@ -2126,3 +2126,83 @@ class TestTieredEscalation:
             page = next(p for p in result.pages if p.page_num == pn)
             assert page.engine == "glm"
             assert page.escalated_from == ""
+
+    def test_local_engine_error_escalates_to_cloud(self) -> None:
+        """Pages where the local engine hard-errors must escalate, not pass through.
+
+        Before the fix, a PageStatus.ERROR output was silently added to
+        passed_outputs and shipped in the final document as a blank page.
+        After the fix, it joins escalated_pages and gets a cloud retry.
+        """
+        pipeline, state = self._setup(page_count=3)
+
+        def local_process_pages(pdf_path, page_nums, config, dpi=200):
+            outputs = []
+            for pn in page_nums:
+                if pn == 2:
+                    # Simulate engine hard-error (timeout, OOM, etc.)
+                    outputs.append(PageOutput(
+                        page_num=pn, text="",
+                        status=PageStatus.ERROR, engine="glm",
+                    ))
+                else:
+                    outputs.append(PageOutput(
+                        page_num=pn, text=_good_text(),
+                        status=PageStatus.SUCCESS, engine="glm",
+                    ))
+            return outputs
+
+        cloud_page_nums_received = []
+
+        def cloud_process_pages(pdf_path, page_nums, config, dpi=200):
+            cloud_page_nums_received.extend(page_nums)
+            return [
+                PageOutput(
+                    page_num=pn, text=_good_text(),
+                    status=PageStatus.SUCCESS, engine="gemini",
+                )
+                for pn in page_nums
+            ]
+
+        local_engine = MagicMock()
+        local_engine.name = "glm"
+        local_engine.is_available.return_value = True
+        local_engine.process_pages.side_effect = local_process_pages
+
+        cloud_engine = MagicMock()
+        cloud_engine.name = "gemini"
+        cloud_engine.is_available.return_value = True
+        cloud_engine.process_pages.side_effect = cloud_process_pages
+
+        from socr.core.config import EngineType
+
+        def _get_engine(engine_type):
+            if engine_type == EngineType.GLM:
+                return local_engine
+            return cloud_engine
+
+        classify = self._mock_classify_pages(easy={1, 2, 3}, hard=set())
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", side_effect=_get_engine),
+            patch(
+                "socr.engines.registry.resolve_local_engine",
+                return_value=EngineType.GLM,
+            ),
+            patch(
+                "socr.core.difficulty.classify_pages",
+                side_effect=classify,
+            ),
+        ):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert 2 in cloud_page_nums_received, (
+            f"Errored page 2 should escalate to cloud; cloud got {cloud_page_nums_received}"
+        )
+
+        page2 = next(p for p in result.pages if p.page_num == 2)
+        assert page2.status == PageStatus.SUCCESS, (
+            "Cloud retry should replace the ERROR with a successful result"
+        )
+        assert page2.engine == "gemini"
+        assert page2.escalated_from == "glm"
